@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Ryx" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#14100C</item>
+        <item name="android:statusBarColor">#14100C</item>
+        <item name="android:navigationBarColor">#14100C</item>
+    </style>
+</resources>
