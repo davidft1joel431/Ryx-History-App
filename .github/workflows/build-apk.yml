@@ -50,8 +50,12 @@ jobs:
           name: Ryx-History-APK
           path: out/*.apk
 
-      - name: Publicar en Releases (solo con etiquetas v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publicar en Releases
         uses: softprops/action-gh-release@v2
         with:
+          # Con etiqueta v* = versión estable; sin etiqueta = "build-N" marcada como pre-lanzamiento
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: Ryx History ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('build {0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           files: out/*.apk
