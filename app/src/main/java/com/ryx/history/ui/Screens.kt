@@ -103,7 +103,7 @@ fun AppRoot(vm: AppViewModel) {
         Box(Modifier.fillMaxSize()) {
             when {
                 !loggedIn -> LoginScreen(vm)
-                !listenerOn -> PermissionScreen()
+                !listenerOn -> PermissionScreen(onUseAnotherAccount = { vm.logout() })
                 else -> HistoryScreen(vm)
             }
             SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(12.dp))
@@ -178,7 +178,7 @@ fun LoginScreen(vm: AppViewModel) {
 /* ------------------------- Permiso de notificaciones ------------------------- */
 
 @Composable
-fun PermissionScreen() {
+fun PermissionScreen(onUseAnotherAccount: () -> Unit) {
     val ctx = LocalContext.current
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(28.dp),
@@ -209,6 +209,8 @@ fun PermissionScreen() {
             onClick = { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
             modifier = Modifier.fillMaxWidth().height(48.dp)
         ) { Text("Dar acceso a notificaciones", fontWeight = FontWeight.Bold) }
+        // Sin esto, quien entró con la cuenta equivocada queda atrapado en esta pantalla.
+        TextButton(onClick = onUseAnotherAccount) { Text("Usar otra cuenta") }
     }
 }
 

@@ -14,17 +14,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        handleIntent(intent)
+        // Al recrearse la actividad (rotación, cambio de tema) el intent se entrega otra vez:
+        // no volver a canjear el código de Discord, que ya se usó.
+        if (savedInstanceState == null) handleIntent(intent)
         setContent { RyxTheme { AppRoot(vm) } }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
     private fun handleIntent(i: Intent?) {
         val uri = i?.data ?: return
-        if (uri.scheme == "ryxhistory" && uri.host == "auth") vm.handleDeepLink(uri)
+        if (!uri.scheme.equals("ryxhistory", ignoreCase = true)) return
+        vm.handleDeepLink(uri)
     }
 }
