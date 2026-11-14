@@ -25,6 +25,11 @@ class Api(private val prefs: Prefs) {
     private val base = BuildConfig.SERVER_URL.trimEnd('/')
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
+    /** false si el APK se compiló sin el secret SERVER_URL y sigue apuntando a la URL de ejemplo. */
+    val isConfigured: Boolean
+        get() = base.startsWith("http", ignoreCase = true) &&
+            !base.contains("example.com", ignoreCase = true)
+
     private fun call(method: String, path: String, body: JSONObject?, token: String?): JSONObject {
         val builder = Request.Builder().url(base + path)
         if (token != null) builder.header("Authorization", "Bearer $token")
@@ -53,20 +58,38 @@ class Api(private val prefs: Prefs) {
             saveSession(call("POST", "/api/auth/refresh", JSONObject().put("refreshToken", rt), null))
             true
         } catch (e: ApiException) {
-            if (e.code == 401 || e.code == 403) prefs.clearSession()   // sesión vencida: volver al login
+            if (e.code == 400 || e.code == 401 || e.code == 403) prefs.clearSession()   // sesión vencida: volver al login
             false
         } catch (e: IOException) {
+            false
+        } catch (e: Exception) {
             false
         }
     }
 
+    /**
+     * Acepta las variantes habituales de respuesta de sesión (accessToken/token,
+     * refreshToken/refresh_token) y no exige el objeto "user" para no reventar
+     * cuando el servidor responde algo inesperado.
+     */
     private fun saveSession(j: JSONObject) {
-        val u = j.getJSONObject("user")
+        val access = firstText(j, "accessToken", "access_token", "token")
+        val refresh = firstText(j, "refreshToken", "refresh_token")
+        if (access.isBlank() || refresh.isBlank()) {
+            throw ApiException(-1, "El servidor no devolvió una sesión válida")
+        }
+        val user = j.optJSONObject("user")
         prefs.saveSession(
-            j.getString("accessToken"), j.getString("refreshToken"),
-            u.optString("name"), u.optString("email")
+            access, refresh,
+            user?.let { firstText(it, "name") }.orEmpty(),
+            user?.let { firstText(it, "email") }.orEmpty()
         )
     }
+
+    private fun firstText(source: JSONObject, vararg names: String): String =
+        names.firstNotNullOfOrNull { name ->
+            source.optString(name).takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+        }.orEmpty()
 
     fun login(email: String, password: String) =
         saveSession(call("POST", "/api/auth/login", JSONObject().put("email", email).put("password", password), null))
