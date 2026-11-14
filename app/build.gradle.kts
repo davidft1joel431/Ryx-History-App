@@ -8,6 +8,9 @@ plugins {
 // Estos valores los inyecta GitHub Actions (Secrets). En local usan valores por defecto.
 val serverUrl: String = System.getenv("SERVER_URL")?.takeIf { it.isNotBlank() } ?: "https://CAMBIA-ESTO.example.com"
 val runNumber: Int = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+// En compilaciones de una etiqueta v* el workflow pasa la versión visible (por ejemplo "1.0.5").
+val tagVersion: String? = System.getenv("APP_VERSION")
+    ?.trim()?.removePrefix("v")?.takeIf { it.isNotEmpty() && it.first().isDigit() }
 val keystorePath: String? = System.getenv("KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
 
 android {
@@ -19,7 +22,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = runNumber          // sube solo con cada compilación → permite actualizar encima
-        versionName = "1.0.$runNumber"
+        versionName = tagVersion ?: "1.0.$runNumber"
         buildConfigField("String", "SERVER_URL", "\"$serverUrl\"")
     }
 
