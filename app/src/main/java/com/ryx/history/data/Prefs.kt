@@ -18,6 +18,15 @@ class Prefs(context: Context) {
 
     val accessToken: String? get() = sp.getString(K_ACCESS, null)
     val refreshToken: String? get() = sp.getString(K_REFRESH, null)
+    /** Dirección del servidor que fijó el usuario en Ajustes; null = la de fábrica. */
+    var serverUrl: String?
+        get() = sp.getString(K_SERVER, null)
+        set(value) {
+            val editor = sp.edit()
+            if (value.isNullOrBlank()) editor.remove(K_SERVER) else editor.putString(K_SERVER, value.trim())
+            editor.apply()
+        }
+
     val userName: String get() = sp.getString(K_NAME, null) ?: ""
     val userEmail: String get() = sp.getString(K_EMAIL, null) ?: ""
 
@@ -96,5 +105,6 @@ class Prefs(context: Context) {
         const val K_STATE = "pending_state"
         const val K_STATE_AT = "pending_state_at"
         const val K_DEVICE = "device_id"
+        const val K_SERVER = "server_url"
     }
 }

@@ -22,7 +22,11 @@ class Api(private val prefs: Prefs) {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
-    private val base = BuildConfig.SERVER_URL.trimEnd('/')
+    private val defaultBase = BuildConfig.SERVER_URL.trimEnd('/')
+
+    /** Dirección efectiva del servidor: la que fijó el usuario o la de fábrica. */
+    val base: String
+        get() = prefs.serverUrl?.takeIf { it.isNotBlank() }?.trimEnd('/') ?: defaultBase
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
     /** false si el APK se compiló sin el secret SERVER_URL y sigue apuntando a la URL de ejemplo. */

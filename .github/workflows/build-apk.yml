@@ -45,11 +45,11 @@ jobs:
       - name: Nombrar el APK
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/release/*.apk "out/Ryx-History-${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/release/*.apk "out/RyxHistory-${{ github.run_number }}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Ryx-History-APK
+          name: RyxHistory-APK
           path: out/*.apk
 
       # Con etiqueta v* = versión estable. No se envía target_commitish: la etiqueta ya
@@ -58,7 +58,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: Ryx History ${{ github.ref_name }}
+          name: RyxHistory ${{ github.ref_name }}
           prerelease: false
           files: out/*.apk
 
@@ -68,7 +68,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Ryx History build ${{ github.run_number }}
+          name: RyxHistory build ${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: true
           files: out/*.apk

@@ -11,6 +11,9 @@ val runNumber: Int = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
 // En compilaciones de una etiqueta v* el workflow pasa la versión visible (por ejemplo "1.0.5").
 val tagVersion: String? = System.getenv("APP_VERSION")
     ?.trim()?.removePrefix("v")?.takeIf { it.isNotEmpty() && it.first().isDigit() }
+// El panel de consola compila en el PC: fija versión y versionCode para poder instalar encima.
+val panelVersionCode: Int? = System.getenv("APP_VERSION_CODE")?.toIntOrNull()
+val panelVersionName: String? = System.getenv("APP_VERSION_NAME")?.trim()?.takeIf { it.isNotEmpty() }
 val keystorePath: String? = System.getenv("KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
 
 android {
@@ -21,8 +24,8 @@ android {
         applicationId = "com.ryx.history"
         minSdk = 26
         targetSdk = 34
-        versionCode = runNumber          // sube solo con cada compilación → permite actualizar encima
-        versionName = tagVersion ?: "1.0.$runNumber"
+        versionCode = panelVersionCode ?: runNumber   // sube solo con cada compilación → permite actualizar encima
+        versionName = panelVersionName ?: tagVersion ?: "1.0.$runNumber"
         buildConfigField("String", "SERVER_URL", "\"$serverUrl\"")
     }
 

@@ -7,3 +7,10 @@ captures/
 .DS_Store
 *.jks
 *.keystore
+
+# Panel de consola (config local y salidas)
+panel/panel.json
+panel/build/
+panel/dist/
+panel/out/
+__pycache__/

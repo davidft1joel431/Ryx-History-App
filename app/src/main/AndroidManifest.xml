@@ -19,7 +19,8 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.Ryx"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="true">   <!-- servidores propios sin TLS (IP/local) -->
+
 
         <activity
             android:name=".MainActivity"

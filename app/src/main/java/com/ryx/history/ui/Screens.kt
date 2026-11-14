@@ -117,6 +117,8 @@ fun AppRoot(vm: AppViewModel) {
 fun LoginScreen(vm: AppViewModel) {
     val ctx = LocalContext.current
     val busy by vm.busy.collectAsStateWithLifecycle()
+    val server by vm.serverBase.collectAsStateWithLifecycle()
+    var serverDialog by remember { mutableStateOf(false) }
     var register by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
@@ -172,6 +174,19 @@ fun LoginScreen(vm: AppViewModel) {
             onClick = { vm.startDiscord(ctx) }, enabled = !busy,
             modifier = Modifier.fillMaxWidth().height(48.dp)
         ) { Text("Continuar con Discord", fontWeight = FontWeight.Bold) }
+        // Si el servidor cambió de dirección, se corrige aquí sin reinstalar la app.
+        TextButton(onClick = { serverDialog = true }) {
+            Text("Servidor: $server", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+
+    if (serverDialog) {
+        ServerDialog(
+            current = server,
+            onDismiss = { serverDialog = false },
+            onSave = { serverDialog = false; vm.setServer(it) },
+            onReset = { serverDialog = false; vm.resetServer() }
+        )
     }
 }
 
@@ -224,8 +239,10 @@ fun HistoryScreen(vm: AppViewModel) {
     val limit by vm.limit.collectAsStateWithLifecycle()
     val total by vm.total.collectAsStateWithLifecycle()
     val pending by vm.pending.collectAsStateWithLifecycle()
+    val server by vm.serverBase.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<String?>(null) }
+    var serverDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -245,6 +262,7 @@ fun HistoryScreen(vm: AppViewModel) {
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Más opciones") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Cambiar servidor") }, onClick = { menu = false; serverDialog = true })
                             DropdownMenuItem(text = { Text("Borrar todo mi historial") }, onClick = { menu = false; confirm = "wipe" })
                             DropdownMenuItem(text = { Text("Cerrar sesión") }, onClick = { menu = false; confirm = "logout" })
                         }
@@ -308,6 +326,46 @@ fun HistoryScreen(vm: AppViewModel) {
             dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancelar") } }
         )
     }
+
+    if (serverDialog) {
+        ServerDialog(
+            current = server,
+            onDismiss = { serverDialog = false },
+            onSave = { serverDialog = false; vm.setServer(it) },
+            onReset = { serverDialog = false; vm.resetServer() }
+        )
+    }
+}
+
+@Composable
+fun ServerDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit, onReset: () -> Unit) {
+    var text by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Servidor") },
+        text = {
+            Column {
+                Text(
+                    "Dirección del servidor RyxHistory. Si el servidor cambia de IP, corrígela aquí.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = true,
+                    placeholder = { Text("https://192.168.1.10:3000") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }) { Text("Guardar") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onReset) { Text("La de fábrica") }
+                TextButton(onClick = onDismiss) { Text("Cancelar") }
+            }
+        }
+    )
 }
 
 @Composable

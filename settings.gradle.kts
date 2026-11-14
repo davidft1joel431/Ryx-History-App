@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "Ryx-History"
+rootProject.name = "RyxHistory"
 include(":app")
