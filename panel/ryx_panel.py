@@ -612,6 +612,7 @@ class Panel:
         self.live_dot = None
         self.live_home: dict = {}
         self.live_home_dot = None
+        self.host_online = None
         self.history: deque = deque(maxlen=120)
         self.history_boxes: dict = {}
         self.current_page = "inicio"
@@ -1395,8 +1396,15 @@ class Panel:
             def done() -> None:
                 self.status_busy = False
                 if data:
+                    # Solo se avisa cuando el host vuelve tras una caida.
+                    if self.host_online is False:
+                        self.log(f"El host volvio a responder · {url}")
+                    self.host_online = True
                     self.paint_status(data)
                 else:
+                    if self.host_online is not False:
+                        self.log(f"El host dejo de responder · {url}")
+                    self.host_online = False
                     for destinos, punto in ((self.live, self.live_dot), (self.live_home, self.live_home_dot)):
                         if punto is not None:
                             punto.config(text="●  sin respuesta del host", fg=RED)
@@ -1439,6 +1447,7 @@ class Panel:
             return
         server["token"] = self.link_token.get().strip()
         save_config(self.repo, self.cfg)
+        self.host_online = None
         self.link_status.config(text="●  conectando…", fg=GOLD)
         self.connect_button.set(text="Conectando…", state="disabled")
         url, token, name = server["url"], server["token"], server["name"]
