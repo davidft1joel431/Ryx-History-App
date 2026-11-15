@@ -121,6 +121,21 @@ def normalize_server(raw: str) -> str | None:
     return text
 
 
+def human_uptime(seconds: float) -> str:
+    """Tiempo encendido en algo corto y legible."""
+    total = max(0, int(seconds or 0))
+    dias, resto = divmod(total, 86400)
+    horas, resto = divmod(resto, 3600)
+    minutos, segundos = divmod(resto, 60)
+    if dias:
+        return f"{dias} d {horas} h"
+    if horas:
+        return f"{horas} h {minutos} min"
+    if minutos:
+        return f"{minutos} min {segundos} s"
+    return f"{segundos} s"
+
+
 def human_size(size: float) -> str:
     value = float(size or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -592,6 +607,9 @@ class Panel:
         self.registry_entries: list = []
         self.registry_view: list = []
         self.registry_index = 0
+        self.live: dict = {}
+        self.current_page = "inicio"
+        self.status_busy = False
         self._state_color = MUTED
         self._pulse = 0
 
@@ -619,6 +637,7 @@ class Panel:
         self._fade_in()
         self.root.after(400, self._pulse_step)
         self.log(f"Panel listo · {len(self.cfg['servers'])} servidor(es) configurado(s)")
+        self.start_status_timer()
 
         if selftest:
             self.root.update()
@@ -803,6 +822,7 @@ class Panel:
     def show_page(self, key: str) -> None:
         for name, button in self.nav_buttons.items():
             button.fade_to("nav-active" if name == key else "nav")
+        self.current_page = key
         self.pages[key].tkraise()
         if key == "inicio":
             self.refresh_home()
@@ -810,6 +830,7 @@ class Panel:
             self.refresh_servers()
         elif key == "servidor":
             self.refresh_connection()
+            self.refresh_status()
         elif key == "registro":
             self.refresh_registry()
         elif key == "apk":
@@ -1183,7 +1204,9 @@ class Panel:
         body.grid(row=1, column=0, sticky="nsew", pady=(self.px(14), 0))
         body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
+        # Las tarjetas van arriba con su alto natural; el hueco sobrante queda abajo.
+        body.rowconfigure(0, weight=0)
+        body.rowconfigure(2, weight=1)
 
         datos_card, datos = self.card(body, "Datos del host")
         datos_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.px(6)))
@@ -1212,6 +1235,90 @@ class Panel:
         self.button(estado, "Abrir Registro", lambda: self.show_page("registro"),
                     kind="primary").pack(anchor="w")
         self.button(estado, "Actualizar", self.connect_node).pack(anchor="w", pady=(self.px(8), 0))
+
+        vivo_card, vivo = self.card(body, "Estado en vivo")
+        vivo_card.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(self.px(10), 0))
+        cabecera = tk.Frame(vivo, bg=CARD)
+        cabecera.pack(fill="x")
+        self.live_dot = self.label(cabecera, "●  esperando datos", size=9, color=MUTED)
+        self.live_dot.pack(side="left")
+        self.label(cabecera, "se actualiza cada 5 s", size=9, color=MUTED).pack(side="right")
+
+        rejilla = tk.Frame(vivo, bg=CARD)
+        rejilla.pack(fill="x", pady=(self.px(10), 0))
+        for columna in range(4):
+            rejilla.columnconfigure(columna, weight=1, uniform="vivo")
+        self.live = {}
+        celdas = (
+            ("uptime", "ENCENDIDO"), ("version", "VERSION"), ("system", "SISTEMA"),
+            ("discord", "DISCORD"), ("users", "CUENTAS"), ("notifications", "NOTIFICACIONES"),
+            ("size", "BASE DE DATOS"), ("updated", "LEIDO A LAS"),
+        )
+        for indice, (clave, titulo) in enumerate(celdas):
+            fila, columna = divmod(indice, 4)
+            celda = tk.Frame(rejilla, bg=CARD)
+            celda.grid(row=fila, column=columna, sticky="w", pady=(0, self.px(6)))
+            self.label(celda, titulo, size=8, color=MUTED).pack(anchor="w")
+            self.live[clave] = self.label(celda, "—", size=11, color=CREAM, bold=True)
+            self.live[clave].pack(anchor="w")
+
+    def paint_status(self, data: dict) -> None:
+        """Vuelca lo que devuelve /api/status en la tarjeta de estado."""
+        if not data:
+            return
+        valores = {
+            "uptime": human_uptime(data.get("uptime", 0)),
+            "version": f"{data.get('app', APP)} {data.get('version', '')}".strip(),
+            "system": str(data.get("system") or "—"),
+            "discord": "configurado" if data.get("discord") else "sin configurar",
+            "users": str(data.get("users", 0)),
+            "notifications": str(data.get("notifications", 0)),
+            "size": human_size(data.get("size", 0)),
+            "updated": time.strftime("%H:%M:%S"),
+        }
+        for clave, texto in valores.items():
+            etiqueta = self.live.get(clave)
+            if etiqueta is not None:
+                etiqueta.config(text=texto)
+        self.live["discord"].config(fg=GREEN if data.get("discord") else MUTED)
+        self.live_dot.config(text=f"●  en vivo · {data.get('node') or 'host'}", fg=GREEN)
+
+    def refresh_status(self) -> None:
+        """Pregunta /api/status sin bloquear la ventana."""
+        if self.status_busy:
+            return
+        server = active_server(self.cfg)
+        if not server:
+            return
+        self.status_busy = True
+        url = server["url"]
+
+        def work() -> None:
+            data = status_of(url)
+
+            def done() -> None:
+                self.status_busy = False
+                if data:
+                    self.paint_status(data)
+                else:
+                    self.live_dot.config(text="●  sin respuesta del host", fg=RED)
+                    self.live["updated"].config(text="—")
+
+            self.ui(done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def start_status_timer(self) -> None:
+        self.root.after(1500, self._status_tick)
+
+    def _status_tick(self) -> None:
+        try:
+            if self.current_page == "servidor":
+                self.refresh_status()
+        except Exception:
+            pass
+        finally:
+            self.root.after(5000, self._status_tick)
 
     def refresh_connection(self) -> None:
         server = active_server(self.cfg)
