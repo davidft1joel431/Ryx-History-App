@@ -211,6 +211,14 @@ class Node:
         raw = self._open("POST", "/api/delete", data=b"", params=params)
         return json.loads(raw.decode("utf-8"))
 
+    # --- registro de usuarios (base de datos del servidor) ---
+
+    def admin_users(self) -> dict:
+        return self.get("/api/admin/users")
+
+    def admin_notifications(self, user_id: str, query: str = "", limit: int = 300) -> dict:
+        return self.get("/api/admin/notifications", user=user_id, q=query, limit=limit)
+
 
 def join_remote(base: str, name: str) -> str:
     name = (name or "").strip().replace("\\", "/").strip("/")
@@ -322,6 +330,65 @@ def enable_dpi_awareness() -> None:
 
 
 # ------------------------------ piezas graficas ------------------------------
+
+def _blend(first: str, second: str, amount: float) -> str:
+    """Mezcla dos colores #rrggbb (amount 0 = primero, 1 = segundo)."""
+    amount = max(0.0, min(1.0, amount))
+    try:
+        a = [int(first[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(second[i:i + 2], 16) for i in (1, 3, 5)]
+    except Exception:
+        return first
+    return "#%02X%02X%02X" % tuple(int(round(a[i] + (b[i] - a[i]) * amount)) for i in range(3))
+
+
+class ProgressBar(tk.Canvas):
+    """Barra fina que barre mientras se compila o se transfiere."""
+
+    def __init__(self, ui, master, height: float = 6):
+        bg = master.cget("bg")
+        super().__init__(master, bg=bg, height=ui.px(height), highlightthickness=0, bd=0)
+        self.ui = ui
+        self._pos = 0.0
+        self._running = False
+        self.bind("<Configure>", lambda _e: self._paint())
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._tick()
+
+    def stop(self) -> None:
+        self._running = False
+        self.delete("all")
+
+    def _tick(self) -> None:
+        if not self._running:
+            return
+        self._pos = (self._pos + 0.05) % 1.0
+        self._paint()
+        self.after(22, self._tick)
+
+    def _paint(self) -> None:
+        self.delete("all")
+        width = self.winfo_width()
+        height = max(self.winfo_height(), self.ui.px(6))
+        if width < 8:
+            return
+        self.create_polygon(
+            _rounded_points(0, 0, width, height, height / 2), smooth=True, splinesteps=14,
+            fill=RAISED, outline=RAISED,
+        )
+        segment = width * 0.26
+        start = self._pos * (width + segment) - segment
+        x0, x1 = max(1.0, start), min(width - 1.0, start + segment)
+        if x1 - x0 > 3:
+            self.create_polygon(
+                _rounded_points(x0, 1, x1, height - 1, (height - 2) / 2), smooth=True,
+                splinesteps=14, fill=GOLD, outline=GOLD,
+            )
+
 
 def _rounded_points(x0: float, y0: float, x1: float, y1: float, radius: float) -> list:
     r = max(1.0, radius)
@@ -463,6 +530,26 @@ class RoundedButton(tk.Canvas):
         if self._enabled and self._command:
             self._command()
 
+    def fade_to(self, kind: str, steps: int = 6) -> None:
+        """Cambia de estilo con una transicion corta de color."""
+        target = self.KINDS.get(kind, self.KINDS["ghost"])
+        start_fill, start_fg = self._fill, self._fg
+        start_line = self._outline or self._fill
+
+        def step(index: int = 1) -> None:
+            amount = index / steps
+            self._fill = _blend(start_fill, target[0], amount)
+            self._fg = _blend(start_fg, target[1], amount)
+            self._outline = _blend(start_line, target[3] or target[0], amount)
+            self._paint()
+            if index < steps:
+                self.after(22, lambda: step(index + 1))
+            else:
+                self._apply_kind(kind)
+                self._paint()
+
+        step()
+
     def set(self, text: str | None = None, kind: str | None = None,
             state: str | None = None) -> None:
         if text is not None:
@@ -492,6 +579,9 @@ class Panel:
         self.node: Node | None = None
         self.remote_path = ""
         self.remote_entries: list = []
+        self.users: list = []
+        self._state_color = MUTED
+        self._pulse = 0
 
         self.root = tk.Tk()
         self.root.title(f"{APP} · Panel de control")
@@ -504,12 +594,19 @@ class Panel:
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(1, weight=1)
 
+        try:
+            self.root.attributes("-alpha", 0.0)
+        except Exception:
+            pass
+
         self._build_header()
         self._build_sidebar()
         self._build_content()
         self._build_log()
         self.show_page("inicio")
         self.root.after(120, self._drain)
+        self._fade_in()
+        self.root.after(400, self._pulse_step)
         self.log(f"Panel listo · {len(self.cfg['servers'])} servidor(es) configurado(s)")
 
         if selftest:
@@ -535,6 +632,25 @@ class Panel:
 
     def log(self, message: str) -> None:
         self.messages.put(message)
+
+    def _fade_in(self, step: int = 0, steps: int = 10) -> None:
+        """La ventana aparece con un fundido en vez de saltar de golpe."""
+        try:
+            self.root.attributes("-alpha", min(1.0, step / steps))
+        except Exception:
+            return
+        if step < steps:
+            self.root.after(16, lambda: self._fade_in(step + 1, steps))
+
+    def _pulse_step(self) -> None:
+        """El punto de estado del servidor respira suave."""
+        self._pulse = (self._pulse + 1) % 30
+        phase = abs(self._pulse - 15) / 15.0
+        try:
+            self.header_state.config(fg=_blend(self._state_color, "#4A3F2E", 0.5 * phase))
+        except Exception:
+            return
+        self.root.after(110, self._pulse_step)
 
     def ui(self, callback) -> None:
         """Se llama desde el hilo principal: nunca se toca Tk desde otro hilo."""
@@ -639,7 +755,7 @@ class Panel:
 
         self.nav_buttons: dict[str, RoundedButton] = {}
         for key, text in (("inicio", "Inicio"), ("servidores", "Servidores"),
-                          ("archivos", "Servidor"), ("apk", "APK")):
+                          ("archivos", "Servidor"), ("registro", "Registro"), ("apk", "APK")):
             button = self.button(
                 sidebar.inner, text, lambda k=key: self.show_page(k), kind="nav",
                 size=10, align="w", padx=14, pady=9,
@@ -661,7 +777,7 @@ class Panel:
         self.content.columnconfigure(0, weight=1)
 
         self.pages: dict[str, tk.Frame] = {}
-        for key in ("inicio", "servidores", "archivos", "apk"):
+        for key in ("inicio", "servidores", "archivos", "registro", "apk"):
             page = tk.Frame(self.content, bg=BG)
             page.grid(row=0, column=0, sticky="nsew")
             self.pages[key] = page
@@ -669,11 +785,12 @@ class Panel:
         self._build_home()
         self._build_servers()
         self._build_files()
+        self._build_registry()
         self._build_apk()
 
     def show_page(self, key: str) -> None:
         for name, button in self.nav_buttons.items():
-            button.set(kind="nav-active" if name == key else "nav")
+            button.fade_to("nav-active" if name == key else "nav")
         self.pages[key].tkraise()
         if key == "inicio":
             self.refresh_home()
@@ -681,6 +798,8 @@ class Panel:
             self.refresh_servers()
         elif key == "archivos":
             self.refresh_files_page()
+        elif key == "registro":
+            self.refresh_registry()
         elif key == "apk":
             self.refresh_apk()
 
@@ -760,7 +879,8 @@ class Panel:
             self.header_server.config(text=server["name"])
             ok, message = self.status.get(server["url"], (False, "sin comprobar"))
             color = MUTED if message == "sin comprobar" else (GREEN if ok else RED)
-            self.header_state.config(text=f"●  {message}", fg=color)
+            self._state_color = color
+            self.header_state.config(text=f"●  {message}")
 
         for child in self.home_grid.winfo_children():
             child.destroy()
@@ -1059,7 +1179,7 @@ class Panel:
         )
         self.button(actions, "Descargar", self.download_selected).pack(side="left", padx=(0, self.px(8)))
         self.button(actions, "Nueva carpeta", self.make_dir).pack(side="left", padx=(0, self.px(8)))
-        self.button(actions, "Base de datos", self.go_databases).pack(side="left", padx=(0, self.px(8)))
+        self.button(actions, "Copia de la base", self.go_databases).pack(side="left", padx=(0, self.px(8)))
         self.button(actions, "Borrar", self.delete_selected, kind="danger").pack(side="left")
 
     def refresh_files_page(self) -> None:
@@ -1111,10 +1231,10 @@ class Panel:
                 self.log(f"Conectado a {name} · {node.base}")
                 self.log(
                     f"  Discord: {'activo' if info.get('discord') else 'sin configurar'}"
-                    f" · base {database.get('path', '(sin datos)')}"
+                    f" · {database.get('users', 0)} cuentas · {database.get('notifications', 0)} notificaciones"
                 )
                 for item in (info.get("databases") or [])[:6]:
-                    self.log(f"  base: {item['path']}  ({human_size(item['size'])})")
+                    self.log(f"  base: {item['name']}  ({human_size(item['size'])})")
                 self.refresh_files()
 
             self.ui(done)
@@ -1199,11 +1319,23 @@ class Panel:
 
             def done() -> None:
                 if not databases:
-                    self.log("No hay bases de datos en la carpeta del servidor.")
+                    self.log("No hay ninguna base de datos en la raiz del servidor.")
                     return
-                self.remote_path = parent_remote(databases[0]["path"])
-                self.log(f"{len(databases)} base(s) de datos en {self.remote_path or '/'}")
-                self.refresh_files()
+                base = max(databases, key=lambda item: item.get("size") or 0)
+                target = filedialog.asksaveasfilename(
+                    initialfile=base["name"], title="Guardar una copia de la base de datos"
+                )
+                if not target:
+                    return
+
+                def copia() -> None:
+                    blob = node.download(base["name"])
+                    Path(target).write_bytes(blob)
+                    self.ui(lambda: self.log(
+                        f"Copia de {base['name']} guardada ({human_size(len(blob))})"
+                    ))
+
+                self.run_bg(copia, lambda message: self.log(f"Error al copiar: {message}"))
 
             self.ui(done)
 
@@ -1297,6 +1429,149 @@ class Panel:
 
         self.run_bg(work, lambda message: self.log(f"Error al borrar: {message}"))
 
+    # --- registro: cuentas e historial de la base de datos ---
+
+    def _build_registry(self):
+        page = self.pages["registro"]
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+        self.page_title(page, "Registro", "Cuentas de la base de datos y todo su historial de notificaciones.")
+
+        body = tk.Frame(page, bg=BG)
+        body.grid(row=1, column=0, sticky="nsew", pady=(self.px(14), 0))
+        body.columnconfigure(0, weight=0, minsize=self.px(300))
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        cuentas_card, cuentas = self.card(body, "Cuentas")
+        cuentas_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.px(6)))
+        cuentas.columnconfigure(0, weight=1)
+        cuentas.rowconfigure(1, weight=1)
+
+        top = tk.Frame(cuentas, bg=CARD)
+        top.grid(row=0, column=0, sticky="ew")
+        self.registry_count = self.label(top, "sin conexion", size=9, color=MUTED)
+        self.registry_count.pack(side="left")
+        self.button(top, "Actualizar", self.load_users).pack(side="right")
+
+        lista = RoundedBox(self, cuentas, fill=LOG_BG, outline=LINE, radius=10, padding=6)
+        lista.grid(row=1, column=0, sticky="nsew", pady=(self.px(10), 0))
+        self.user_list = tk.Listbox(
+            lista.inner, bg=LOG_BG, fg=CREAM, selectbackground=GOLD, selectforeground=INK,
+            bd=0, highlightthickness=0, font=self.fnt(9), activestyle="none",
+        )
+        self.user_list.pack(fill="both", expand=True)
+        self.user_list.bind("<<ListboxSelect>>", lambda _e: self.load_user_notifications())
+
+        hist_card, hist = self.card(body, "Historial del usuario")
+        hist_card.grid(row=0, column=1, sticky="nsew", padx=(self.px(6), 0))
+        hist.columnconfigure(0, weight=1)
+        hist.rowconfigure(3, weight=1)
+
+        self.registry_user = self.label(hist, "Selecciona una cuenta", size=11, color=CREAM, bold=True)
+        self.registry_user.grid(row=0, column=0, sticky="w")
+        self.registry_meta = self.label(hist, "", size=9, color=MUTED)
+        self.registry_meta.grid(row=1, column=0, sticky="w", pady=(self.px(2), self.px(10)))
+
+        bar = tk.Frame(hist, bg=CARD)
+        bar.grid(row=2, column=0, sticky="ew")
+        bar.columnconfigure(0, weight=1)
+        search_box, self.registry_query = self.field(bar, "", width=14)
+        search_box.grid(row=0, column=0, sticky="ew")
+        self.registry_query.bind("<Return>", lambda _e: self.load_user_notifications())
+        self.button(bar, "Buscar", self.load_user_notifications).grid(row=0, column=1, padx=(self.px(6), 0))
+
+        historial = RoundedBox(self, hist, fill=LOG_BG, outline=LINE, radius=10, padding=6)
+        historial.grid(row=3, column=0, sticky="nsew", pady=(self.px(10), 0))
+        self.registry_list = tk.Listbox(
+            historial.inner, bg=LOG_BG, fg=CREAM, selectbackground=RAISED, selectforeground=CREAM,
+            bd=0, highlightthickness=0, font=self.fnt(9, mono=True), activestyle="none",
+        )
+        self.registry_list.pack(fill="both", expand=True)
+
+    def refresh_registry(self) -> None:
+        if self.node is None:
+            self.registry_count.config(text="conecta en la pagina Servidor", fg=MUTED)
+            self.registry_user.config(text="Sin conexion")
+            self.registry_meta.config(text="La base de datos se lee a traves del servidor.")
+            self.user_list.delete(0, "end")
+            self.registry_list.delete(0, "end")
+            self.user_list.insert("end", "   Conecta primero con el servidor")
+            return
+        self.load_users()
+
+    def load_users(self) -> None:
+        node = self.node
+        if node is None:
+            self.refresh_registry()
+            return
+
+        def work() -> None:
+            payload = node.admin_users()
+
+            def done() -> None:
+                self.users = payload.get("users") or []
+                self.user_list.delete(0, "end")
+                self.registry_count.config(text=f"{len(self.users)} cuenta(s)", fg=MUTED)
+                for user in self.users:
+                    nombre = user.get("name") or "—"
+                    correo = user.get("email") or "sin correo"
+                    self.user_list.insert("end", f"{nombre} · {correo}  ({user.get('notifications', 0)})")
+                if not self.users:
+                    self.user_list.insert("end", "   Todavia no hay cuentas")
+                    self.registry_user.config(text="Sin cuentas")
+                    self.registry_meta.config(text="")
+                    self.registry_list.delete(0, "end")
+                    return
+                self.user_list.selection_set(0)
+                self.load_user_notifications()
+
+            self.ui(done)
+
+        self.run_bg(work, lambda message: self.log(f"Registro: {message}"))
+
+    def load_user_notifications(self) -> None:
+        node = self.node
+        if node is None:
+            return
+        selection = self.user_list.curselection()
+        if not selection or selection[0] >= len(self.users):
+            return
+        user = self.users[selection[0]]
+        query = self.registry_query.get().strip()
+
+        def work() -> None:
+            payload = node.admin_notifications(user["id"], query, 300)
+
+            def done() -> None:
+                self.registry_user.config(text=user.get("name") or user.get("email") or "Cuenta")
+                creado = user.get("created_at") or 0
+                fecha = time.strftime("%d/%m/%Y", time.localtime(creado)) if creado else "—"
+                self.registry_meta.config(
+                    text=(
+                        f"{user.get('email') or 'sin correo'}  ·  "
+                        f"discord: {'si' if user.get('discord') else 'no'}  ·  "
+                        f"alta {fecha}  ·  {payload.get('count', 0)} notificaciones"
+                    )
+                )
+                self.registry_list.delete(0, "end")
+                for item in payload.get("notifications") or []:
+                    posted = item.get("posted_at") or 0
+                    hora = time.strftime("%d/%m %H:%M", time.localtime(posted / 1000)) if posted else "—"
+                    titulo = item.get("title") or ""
+                    texto = item.get("text") or ""
+                    resumen = " — ".join(part for part in (titulo, texto) if part) or "(sin texto)"
+                    self.registry_list.insert(
+                        "end",
+                        f"{hora}  {(item.get('app') or item.get('package') or '?')[:18]:<18}  {resumen[:120]}",
+                    )
+                if not payload.get("notifications"):
+                    self.registry_list.insert("end", "   Esta cuenta no tiene notificaciones")
+
+            self.ui(done)
+
+        self.run_bg(work, lambda message: self.log(f"Historial: {message}"))
+
     # --- APK ---
 
     def _build_apk(self):
@@ -1329,6 +1604,9 @@ class Panel:
         self.button(buttons, "Abrir carpeta de APKs", self.open_out).pack(side="left", padx=(0, self.px(8)))
         self.button(buttons, "Cambiar servidor activo", lambda: self.show_page("servidores")).pack(side="left")
 
+        self.build_bar = ProgressBar(self, body, height=6)
+        self.build_bar.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(self.px(12), 0))
+
         self.apk_hint = self.label(page, "", size=8, color=MUTED, bg=BG)
         self.apk_hint.grid(row=2, column=0, sticky="w", pady=(self.px(12), 0))
 
@@ -1358,11 +1636,13 @@ class Panel:
         self.cfg["versionCode"] = int(code_text)
         save_config(self.repo, self.cfg)
         self.build_button.set(text="Compilando…", state="disabled")
+        self.build_bar.start()
 
         def work() -> None:
             target = build(self.repo, self.cfg, self.log)
 
             def done() -> None:
+                self.build_bar.stop()
                 self.build_button.set(text="Compilar APK", state="normal")
                 self.refresh_apk()
                 self.refresh_home()

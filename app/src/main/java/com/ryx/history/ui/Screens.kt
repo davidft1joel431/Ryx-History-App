@@ -3,6 +3,17 @@ package com.ryx.history.ui
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -59,7 +70,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -99,12 +113,21 @@ fun AppRoot(vm: AppViewModel) {
         }
     }
 
+    // Cambio de pantalla con un fundido corto en vez de un salto seco.
+    val stage = when {
+        !loggedIn -> "login"
+        !listenerOn -> "permiso"
+        else -> "historial"
+    }
+
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize()) {
-            when {
-                !loggedIn -> LoginScreen(vm)
-                !listenerOn -> PermissionScreen(onUseAnotherAccount = { vm.logout() })
-                else -> HistoryScreen(vm)
+            Crossfade(targetState = stage, animationSpec = tween(420), label = "pantalla") { actual ->
+                when (actual) {
+                    "login" -> LoginScreen(vm)
+                    "permiso" -> PermissionScreen(onUseAnotherAccount = { vm.logout() })
+                    else -> HistoryScreen(vm)
+                }
             }
             SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(12.dp))
         }
@@ -117,13 +140,32 @@ fun AppRoot(vm: AppViewModel) {
 fun LoginScreen(vm: AppViewModel) {
     val ctx = LocalContext.current
     val busy by vm.busy.collectAsStateWithLifecycle()
-    val server by vm.serverBase.collectAsStateWithLifecycle()
-    var serverDialog by remember { mutableStateOf(false) }
     var register by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
 
+    // Aparición del logo y resplandor dorado que respira detrás del formulario.
+    val intro = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { intro.animateTo(1f, tween(700, easing = LinearOutSlowInEasing)) }
+    val glowTransition = rememberInfiniteTransition(label = "resplandor")
+    val glow by glowTransition.animateFloat(
+        initialValue = 0.35f, targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            tween(4200, easing = FastOutSlowInEasing), RepeatMode.Reverse
+        ),
+        label = "glow"
+    )
+
+    Box(Modifier.fillMaxSize()) {
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.radialGradient(
+                colors = listOf(RyxGold.copy(alpha = 0.16f * glow), Color.Transparent),
+                radius = 950f
+            )
+        )
+    )
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -131,7 +173,13 @@ fun LoginScreen(vm: AppViewModel) {
     ) {
         Image(
             painterResource(R.drawable.logo), contentDescription = "Ryx History",
-            modifier = Modifier.fillMaxWidth(0.75f), contentScale = ContentScale.FillWidth
+            modifier = Modifier.fillMaxWidth(0.75f).graphicsLayer {
+                alpha = intro.value
+                val escala = 0.88f + 0.12f * intro.value
+                scaleX = escala
+                scaleY = escala
+            },
+            contentScale = ContentScale.FillWidth
         )
         Spacer(Modifier.height(8.dp))
         Text(
@@ -174,19 +222,7 @@ fun LoginScreen(vm: AppViewModel) {
             onClick = { vm.startDiscord(ctx) }, enabled = !busy,
             modifier = Modifier.fillMaxWidth().height(48.dp)
         ) { Text("Continuar con Discord", fontWeight = FontWeight.Bold) }
-        // Si el servidor cambió de dirección, se corrige aquí sin reinstalar la app.
-        TextButton(onClick = { serverDialog = true }) {
-            Text("Servidor: $server", style = MaterialTheme.typography.labelSmall)
-        }
     }
-
-    if (serverDialog) {
-        ServerDialog(
-            current = server,
-            onDismiss = { serverDialog = false },
-            onSave = { serverDialog = false; vm.setServer(it) },
-            onReset = { serverDialog = false; vm.resetServer() }
-        )
     }
 }
 
@@ -239,10 +275,8 @@ fun HistoryScreen(vm: AppViewModel) {
     val limit by vm.limit.collectAsStateWithLifecycle()
     val total by vm.total.collectAsStateWithLifecycle()
     val pending by vm.pending.collectAsStateWithLifecycle()
-    val server by vm.serverBase.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<String?>(null) }
-    var serverDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -262,7 +296,6 @@ fun HistoryScreen(vm: AppViewModel) {
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Más opciones") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("Cambiar servidor") }, onClick = { menu = false; serverDialog = true })
                             DropdownMenuItem(text = { Text("Borrar todo mi historial") }, onClick = { menu = false; confirm = "wipe" })
                             DropdownMenuItem(text = { Text("Cerrar sesión") }, onClick = { menu = false; confirm = "logout" })
                         }
@@ -298,7 +331,9 @@ fun HistoryScreen(vm: AppViewModel) {
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(list, key = { it.uuid }) { NotificationCard(it) }
+                    items(list, key = { it.uuid }) {
+                        NotificationCard(it, Modifier.animateItem())
+                    }
                     if (list.size >= limit) item {
                         TextButton(onClick = { vm.loadMore() }, modifier = Modifier.fillMaxWidth()) { Text("Cargar más") }
                     }
@@ -327,49 +362,10 @@ fun HistoryScreen(vm: AppViewModel) {
         )
     }
 
-    if (serverDialog) {
-        ServerDialog(
-            current = server,
-            onDismiss = { serverDialog = false },
-            onSave = { serverDialog = false; vm.setServer(it) },
-            onReset = { serverDialog = false; vm.resetServer() }
-        )
-    }
 }
 
 @Composable
-fun ServerDialog(current: String, onDismiss: () -> Unit, onSave: (String) -> Unit, onReset: () -> Unit) {
-    var text by remember { mutableStateOf(current) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Servidor") },
-        text = {
-            Column {
-                Text(
-                    "Dirección del servidor RyxHistory. Si el servidor cambia de IP, corrígela aquí.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = text, onValueChange = { text = it }, singleLine = true,
-                    placeholder = { Text("https://192.168.1.10:3000") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = { onSave(text) }) { Text("Guardar") } },
-        dismissButton = {
-            Row {
-                TextButton(onClick = onReset) { Text("La de fábrica") }
-                TextButton(onClick = onDismiss) { Text("Cancelar") }
-            }
-        }
-    )
-}
-
-@Composable
-fun NotificationCard(n: NotificationEntity) {
+fun NotificationCard(n: NotificationEntity, modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
     var open by remember { mutableStateOf(false) }
     val icon = remember(n.packageName) {
@@ -377,9 +373,13 @@ fun NotificationCard(n: NotificationEntity) {
     }
     val time = remember(n.postedAt) { SimpleDateFormat("d MMM · HH:mm", Locale("es", "PE")).format(Date(n.postedAt)) }
     val body = n.bigText?.takeIf { it.isNotBlank() } ?: n.text
+    val dotColor by animateColorAsState(
+        targetValue = if (n.synced) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.tertiary,
+        animationSpec = tween(500), label = "estado"
+    )
 
     Card(
-        modifier = Modifier.fillMaxWidth().clickable { open = !open },
+        modifier = modifier.fillMaxWidth().animateContentSize().clickable { open = !open },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(12.dp)
     ) {
@@ -401,10 +401,7 @@ fun NotificationCard(n: NotificationEntity) {
                     )
                     Text(time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(6.dp))
-                    Box(
-                        Modifier.size(8.dp).clip(RoundedCornerShape(4.dp))
-                            .background(if (n.synced) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.tertiary)
-                    )
+                    Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(dotColor))
                 }
                 if (!n.title.isNullOrBlank()) {
                     Text(

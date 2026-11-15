@@ -306,6 +306,110 @@ class Store:
             size = 0
         return {"path": str(self.path), "users": users, "notifications": notes, "size": size}
 
+    def public_stats(self) -> dict:
+        """Sin rutas: el panel no necesita saber donde esta el archivo."""
+        data = self.stats()
+        data.pop("path", None)
+        return data
+
+    # --- consultas del panel (registro de usuarios) ---
+
+    def list_users(self) -> list:
+        with self.lock, self._connect() as con:
+            rows = con.execute(
+                "SELECT u.id, u.name, u.email, u.discord_id, u.created_at, "
+                "  (SELECT COUNT(*) FROM notifications n WHERE n.user_id = u.id) AS notifications, "
+                "  (SELECT MAX(posted_at) FROM notifications n WHERE n.user_id = u.id) AS last_note, "
+                "  (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS devices, "
+                "  (SELECT MAX(last_seen) FROM devices d WHERE d.user_id = u.id) AS last_seen "
+                "FROM users u ORDER BY u.created_at DESC"
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["discord"] = bool(item.pop("discord_id", None))
+            item["password"] = None
+            result.append(item)
+        return result
+
+    def user_row(self, user_id: str):
+        user = self.user_by_id(user_id)
+        if not user:
+            return None
+        return {
+            "id": user["id"],
+            "name": user.get("name") or "",
+            "email": user.get("email") or "",
+            "discord": bool(user.get("discord_id")),
+            "created_at": user.get("created_at") or 0,
+        }
+
+    def user_notifications(self, user_id: str, query: str = "", limit: int = 200) -> list:
+        limit = max(1, min(int(limit or 200), 1000))
+        query = (query or "").strip()
+        sql = (
+            "SELECT uuid, package_name, app_name, title, text, sub_text, big_text, category, "
+            "channel, posted_at FROM notifications WHERE user_id = ?"
+        )
+        params: list = [user_id]
+        if query:
+            sql += (
+                " AND (title LIKE ? OR text LIKE ? OR big_text LIKE ? OR app_name LIKE ?)"
+            )
+            like = f"%{query}%"
+            params += [like, like, like, like]
+        sql += " ORDER BY posted_at DESC LIMIT ?"
+        params.append(limit)
+        with self.lock, self._connect() as con:
+            rows = con.execute(sql, params).fetchall()
+        return [
+            {
+                "uuid": row["uuid"],
+                "package": row["package_name"],
+                "app": row["app_name"],
+                "title": row["title"],
+                "text": row["text"],
+                "sub": row["sub_text"],
+                "big": row["big_text"],
+                "category": row["category"],
+                "channel": row["channel"],
+                "posted_at": row["posted_at"],
+            }
+            for row in rows
+        ]
+
+
+class Limitador:
+    """Limite de peticiones por IP para que nadie pueda probar claves en bucle."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.hits: dict = {}
+        self.blocked: dict = {}
+
+    def espera(self, key: str) -> int:
+        with self.lock:
+            return max(0, int(self.blocked.get(key, 0) - time.time()))
+
+    def permite(self, key: str, limite: int, ventana: int, castigo: int = 0) -> bool:
+        ahora = time.time()
+        with self.lock:
+            if self.blocked.get(key, 0) > ahora:
+                return False
+            marcas = [t for t in self.hits.get(key, []) if ahora - t < ventana]
+            marcas.append(ahora)
+            self.hits[key] = marcas
+            if len(marcas) > limite:
+                if castigo:
+                    self.blocked[key] = ahora + castigo
+                    self.hits.pop(key, None)
+                return False
+            return True
+
+
+LIMITES = Limitador()
+MAX_JSON = 4 * 1024 * 1024
+
 
 def _databases(root: Path) -> list:
     found: list = []
@@ -414,7 +518,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Server", APP)
+        if "html" in content_type:
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';",
+            )
         for key, value in (extra or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -468,7 +582,8 @@ class Handler(BaseHTTPRequestHandler):
     # --- claves ---
 
     def _token_ok(self) -> bool:
-        given = self.headers.get("X-Ryx-Token") or self._query("token")
+        # Solo por cabecera: en la URL quedaria escrita en los registros del proxy.
+        given = self.headers.get("X-Ryx-Token") or ""
         return bool(self.token) and hmac.compare_digest(given, self.token)
 
     def _bearer_user(self):
@@ -495,6 +610,9 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------ rutas de app -----------------------------
 
     def _auth_register(self):
+        ip = self.client_address[0]
+        if not LIMITES.permite(f"reg:{ip}", 5, 900, castigo=300):
+            return self._error(429, "Demasiadas cuentas desde esta conexion. Espera unos minutos.")
         data = self._body_json()
         email = str(data.get("email") or "").strip().lower()
         password = str(data.get("password") or "")
@@ -510,6 +628,10 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(self._session_payload(user))
 
     def _auth_login(self):
+        ip = self.client_address[0]
+        if not LIMITES.permite(f"login:{ip}", 8, 300, castigo=600):
+            espera = max(60, LIMITES.espera(f"login:{ip}"))
+            return self._error(429, f"Demasiados intentos. Espera {espera // 60 + 1} minutos.")
         data = self._body_json()
         email = str(data.get("email") or "").strip().lower()
         password = str(data.get("password") or "")
@@ -672,6 +794,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _info(self):
         total, free = _disk()
+        # Sin rutas absolutas ni nombres de carpeta: el panel solo necesita numeros.
+        databases = [
+            {"name": item["name"], "size": item["size"], "modified": item["modified"]}
+            for item in _databases(self.root)
+        ]
         payload = {
             "ok": True,
             "app": APP,
@@ -680,15 +807,32 @@ class Handler(BaseHTTPRequestHandler):
             "system": f"{platform.system()} {platform.release()}",
             "python": platform.python_version(),
             "uptime": int(time.time() - STARTED),
-            "root": str(self.root),
             "disk_total": total,
             "disk_free": free,
-            "databases": _databases(self.root),
-            "database": self.store.stats() if self.store else {},
+            "databases": databases,
+            "database": self.store.public_stats() if self.store else {},
             "discord": bool(self.discord_id and self.discord_secret),
-            "public_url": self._base_url(),
         }
         self._json(payload)
+
+    # --- registro de usuarios (solo con la clave del panel) ---
+
+    def _admin_users(self):
+        users = self.store.list_users()
+        self._json({"ok": True, "total": len(users), "users": users})
+
+    def _admin_notifications(self):
+        user_id = self._query("user")
+        user = self.store.user_row(user_id) if user_id else None
+        if not user:
+            self._error(404, "Ese usuario no existe")
+            return
+        try:
+            limite = int(self._query("limit") or 200)
+        except ValueError:
+            limite = 200
+        items = self.store.user_notifications(user_id, self._query("q"), limite)
+        self._json({"ok": True, "user": user, "count": len(items), "notifications": items})
 
     def _file_route(self, route: str, post: bool) -> bool:
         if not self._token_ok():
@@ -696,6 +840,12 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if route == "/api/info" and not post:
             self._info()
+            return True
+        if route == "/api/admin/users" and not post:
+            self._admin_users()
+            return True
+        if route == "/api/admin/notifications" and not post:
+            self._admin_notifications()
             return True
         if route == "/api/list" and not post:
             target = self._target(self._query("path"))
@@ -789,8 +939,17 @@ class Handler(BaseHTTPRequestHandler):
         self._error(404, "Ruta desconocida")
         return True
 
+    def _limpio(self, text) -> str:
+        """Nunca devolver rutas del disco en un mensaje de error."""
+        return str(text).replace(str(self.root), "…")
+
     def _dispatch(self, post: bool) -> None:
         route = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
+        ip = self.client_address[0]
+        if not LIMITES.permite(f"all:{ip}", 300, 60, castigo=60):
+            espera = LIMITES.espera(f"all:{ip}") or 60
+            self._error(429, f"Demasiadas peticiones. Espera {espera} segundos.")
+            return
         if route in ("/api/ping", "/ping", "/"):
             self._ping()
             return
@@ -825,9 +984,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._dispatch(post=False)
         except PermissionError as error:
-            self._error(403, str(error))
+            self._error(403, self._limpio(error))
+        except FileNotFoundError:
+            self._error(404, "Ese archivo no existe")
         except Exception as error:  # pragma: no cover
-            self._error(500, f"{type(error).__name__}: {error}")
+            self.log_message("error interno: %s", error)
+            self._error(500, "Error interno del servidor")
 
     def do_HEAD(self):  # noqa: N802
         self.do_GET()
@@ -837,23 +999,31 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # Las subidas se leen en streaming; el resto se lee aqui para poder
             # responder 401/400 sin dejar el cuerpo sin consumir.
+            length = int(self.headers.get("Content-Length") or 0)
+            if route != "/api/upload" and length > MAX_JSON:
+                self.close_connection = True
+                self._error(413, "La peticion es demasiado grande")
+                return
             if route != "/api/upload":
                 self._read_body()
             self._dispatch(post=True)
         except PermissionError as error:
-            self._error(403, str(error))
+            self._error(403, self._limpio(error))
         except json.JSONDecodeError:
             self._error(400, "El cuerpo de la peticion no es JSON valido")
         except OSError as error:
-            self._error(409, f"{type(error).__name__}: {error}")
+            self.log_message("error de disco: %s", error)
+            self._error(409, self._limpio(f"{type(error).__name__}: {error}"))
         except Exception as error:  # pragma: no cover
-            self._error(500, f"{type(error).__name__}: {error}")
+            self.log_message("error interno: %s", error)
+            self._error(500, "Error interno del servidor")
 
     def do_DELETE(self):  # noqa: N802
         try:
             self._dispatch(post=False)
         except Exception as error:  # pragma: no cover
-            self._error(500, f"{type(error).__name__}: {error}")
+            self.log_message("error interno: %s", error)
+            self._error(500, "Error interno del servidor")
 
 
 def _load_token(value: str, folder: Path) -> str:
