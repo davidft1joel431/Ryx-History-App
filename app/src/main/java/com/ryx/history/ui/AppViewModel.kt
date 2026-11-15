@@ -10,6 +10,7 @@ import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ryx.history.RyxApp
+import com.ryx.history.data.AppCount
 import com.ryx.history.data.NotificationEntity
 import com.ryx.history.net.Api
 import com.ryx.history.sync.SyncScheduler
@@ -48,6 +49,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val total: StateFlow<Int> = dao.count().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     val pending: StateFlow<Int> = dao.pendingCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val sent: StateFlow<Int> = dao.sentCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val apps: StateFlow<List<AppCount>> =
+        dao.apps().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Datos de la cuenta tal como los ve el servidor. */
+    data class AccountProfile(
+        val name: String = "",
+        val email: String = "",
+        val discord: Boolean = false,
+        val notifications: Int = 0
+    )
+
+    val profile = MutableStateFlow<AccountProfile?>(null)
+
+    fun byApp(pkg: String): StateFlow<List<NotificationEntity>> =
+        dao.byApp(pkg, PAGE).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private fun runNetwork(after: (() -> Unit)? = null, block: suspend () -> Unit) {
         viewModelScope.launch {
@@ -104,7 +121,56 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         message.value = "Termina el inicio de sesión en el navegador y vuelve a Ryx History."
     }
 
+    /** Pide al servidor los datos de la cuenta (nombre, correo y si tiene Discord). */
+    fun loadProfile() {
+        if (ryx.prefs.accessToken == null) return
+        runNetwork {
+            val user = ryx.api.me()
+            profile.value = AccountProfile(
+                name = user.optString("name"),
+                email = user.optString("email"),
+                discord = user.optBoolean("discord"),
+                notifications = user.optInt("notifications")
+            )
+        }
+    }
+
+    /** Abre Discord para vincular la cuenta que entró con correo y contraseña. */
+    fun linkDiscord(context: Context) {
+        if (!ensureConfigured()) return
+        viewModelScope.launch {
+            busy.value = true
+            try {
+                val url = withContext(Dispatchers.IO) { ryx.api.discordLinkUrl() }
+                if (url.isBlank()) {
+                    message.value = "El servidor no tiene Discord configurado."
+                    return@launch
+                }
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                message.value = "Termina de vincular en el navegador y vuelve a Ryx History."
+            } catch (e: Api.ApiException) {
+                message.value = e.message ?: "El servidor devolvió un error"
+            } catch (e: IOException) {
+                message.value = "No hay conexión con el servidor"
+            } catch (e: ActivityNotFoundException) {
+                message.value = "No hay un navegador instalado para abrir Discord."
+            } catch (e: Exception) {
+                message.value = "No se pudo abrir Discord. Inténtalo de nuevo."
+            } finally {
+                busy.value = false
+            }
+        }
+    }
+
     fun handleDeepLink(uri: Uri) {
+        // Vuelta del navegador tras vincular Discord a una cuenta con correo.
+        if (uri.getQueryParameter("linked") == "1") {
+            message.value = "Cuenta de Discord vinculada"
+            loadProfile()
+            return
+        }
         val error = firstParam(uri, "error")
         val code = firstParam(uri, "code", "auth_code", "authorization_code")
         val access = firstParam(uri, "accessToken", "access_token", "token")

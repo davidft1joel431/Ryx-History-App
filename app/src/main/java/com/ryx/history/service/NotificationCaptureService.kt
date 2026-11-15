@@ -1,7 +1,9 @@
 package com.ryx.history.service
 
 import android.app.Notification
+import android.graphics.Bitmap
 import android.service.notification.NotificationListenerService
+import android.util.Base64
 import android.service.notification.StatusBarNotification
 import com.ryx.history.RyxApp
 import com.ryx.history.data.NotificationEntity
@@ -11,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.io.ByteArrayOutputStream
 import java.util.UUID
 
 /** Captura cada notificación que llega al teléfono y la guarda en la base local. */
@@ -37,6 +40,26 @@ class NotificationCaptureService : NotificationListenerService() {
             sbn.packageName
         }
 
+        // Icono o foto de la notificación, en pequeño, para verla en el perfil.
+        val image = runCatching {
+            val bitmap = extras.getParcelable<Bitmap>(Notification.EXTRA_LARGE_ICON)
+                ?: extras.getParcelable<Bitmap>(Notification.EXTRA_LARGE_ICON_BIG)
+            bitmap?.let { original ->
+                val side = maxOf(original.width, original.height).coerceAtLeast(1)
+                val scale = if (side > 180) 180f / side else 1f
+                val scaled = if (scale < 1f) Bitmap.createScaledBitmap(
+                    original,
+                    (original.width * scale).toInt().coerceAtLeast(1),
+                    (original.height * scale).toInt().coerceAtLeast(1),
+                    true
+                ) else original
+                val out = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.PNG, 90, out)
+                val bytes = out.toByteArray()
+                if (bytes.size > 120_000) null else Base64.encodeToString(bytes, Base64.NO_WRAP)
+            }
+        }.getOrNull()
+
         // UUID determinista: la misma notificación nunca se guarda dos veces
         val id = UUID.nameUUIDFromBytes("${sbn.key}|${sbn.postTime}|$title|$text|$big".toByteArray()).toString()
         val entity = NotificationEntity(
@@ -46,7 +69,8 @@ class NotificationCaptureService : NotificationListenerService() {
             title = title, text = text, subText = sub, bigText = big,
             category = n.category?.take(64),
             channelId = n.channelId?.take(256),
-            postedAt = sbn.postTime
+            postedAt = sbn.postTime,
+            image = image
         )
         val app = applicationContext as RyxApp
         scope.launch {

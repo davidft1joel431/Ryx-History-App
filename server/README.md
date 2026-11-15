@@ -1,15 +1,15 @@
 # Servidor RyxHistory
 
-Un solo proceso en el servidor host hace las tres cosas:
+Un solo proceso en el servidor host hace dos cosas:
 
 - **Base de datos de la app** (SQLite en `<root>/ryx.db`): cuentas, sesiones,
-  dispositivos y notificaciones sincronizadas.
-- **API que usa el APK**: registro, entrada, refresco de sesión, `/api/sync` y
-  borrado del historial.
-- **Inicio de sesión con Discord** (OAuth2), usando la dirección de este
-  servidor como `redirect_uri`.
-- **Agente del panel** `RyxHistory.exe`: estado, listado y transferencia de
-  archivos con clave.
+  dispositivos y notificaciones sincronizadas (con texto completo e imagen).
+- **API que usa el APK**: registro, entrada, refresco de sesión, `/api/sync`,
+  perfil (`/api/me`), vínculo con Discord y borrado del historial.
+
+El panel `RyxPanel.exe` ya **no** administra archivos del disco: solo se conecta
+como base de datos para leer las cuentas, sus mensajes por sección y las
+imágenes guardadas.
 
 ## Arrancar
 
@@ -46,6 +46,9 @@ Deja abierto el puerto 8787 (o el que elijas) en el firewall del servidor.
 
    También valen las variables `RYX_DISCORD_ID` y `RYX_DISCORD_SECRET`.
 
+Con Discord configurado la app puede entrar con Discord o vincular Discord a una
+cuenta creada con correo y contraseña (perfil → **Vincular mi Discord**).
+
 **Si Discord rechaza la URL** (`Invalid OAuth2 redirect_uri`): Discord exige
 HTTPS en los redirects, salvo `localhost`/`127.0.0.1`. Con una IP suelta y
 `http://` puede no dejarte guardarla. En ese caso pon un proxy con HTTPS
@@ -58,8 +61,7 @@ seguir hablando por `http://IP:8787` sin problema (el APK permite tráfico sin T
 En el panel, página **Servidores**, la dirección del servidor activo se escribe
 como `http://192.168.1.10:8787` (o `https://dominio.com`). Al compilar el APK,
 esa dirección queda dentro de la app (`SERVER_URL`), así que la base de datos y
-el login de Discord usan ese mismo servidor. También se puede cambiar luego en
-la app: Ajustes → servidor.
+el login de Discord usan ese mismo servidor. La app no permite cambiarla después.
 
 ## Rutas
 
@@ -73,25 +75,20 @@ la app: Ajustes → servidor.
 | POST | `/api/auth/refresh` | `{refreshToken}` → sesión nueva |
 | POST | `/api/auth/logout` | `{refreshToken}` |
 | POST | `/api/auth/discord/exchange` | `{code}` → sesión |
+| POST | `/api/auth/discord/link` | Vincula Discord a la cuenta de la sesión (devuelve la URL) |
+| GET | `/api/me` | Perfil: nombre, correo, Discord vinculado, contadores |
 | POST | `/api/sync` | `{device, notifications[]}` → `{accepted:[uuid]}` |
 | DELETE | `/api/me/history` | Borra el historial de la cuenta |
 | GET | `/api/info` | Nodo, disco, base de datos, Discord (clave del panel) |
 | GET | `/api/admin/users` | Cuentas con sus contadores (clave del panel) |
 | GET | `/api/admin/notifications?user=&q=&limit=` | Historial de una cuenta (clave del panel) |
-| GET | `/api/list?path=` | Listar una carpeta (clave del panel) |
-| GET | `/api/download?path=` | Descargar un archivo (clave del panel) |
-| POST | `/api/upload?path=` | Subir un archivo (clave del panel) |
-| POST | `/api/mkdir?path=` | Crear carpeta (clave del panel) |
-| POST | `/api/delete?path=` | Borrar archivo o carpeta (clave del panel) |
-| POST | `/api/rename?path=&to=` | Renombrar o mover (clave del panel) |
 
-Las rutas de sesión usan `Authorization: Bearer <accessToken>`; las de archivos,
+Las rutas de la app usan `Authorization: Bearer <accessToken>`; las del panel,
 la cabecera `X-Ryx-Token`.
 
 ## Seguridad
 
-- La API de la app nunca devuelve rutas del disco: `/api/info` solo da nombres y
-  tamaños, y `/api/list` trabaja con rutas relativas a `--root`.
+- La API nunca devuelve rutas del disco: `/api/info` solo da nombres y tamaños.
 - La clave del panel viaja solo en la cabecera `X-Ryx-Token` (nunca en la URL) y
   se compara en tiempo constante.
 - Límites por IP: 300 peticiones por minuto en general, 8 intentos de entrada por
@@ -101,11 +98,8 @@ la cabecera `X-Ryx-Token`.
   se guardan como hash y caducan (30 días el acceso, 180 el refresco).
 - Los mensajes de error no incluyen trazas ni rutas, y las páginas HTML se sirven
   con CSP, `X-Frame-Options: DENY` y `nosniff`.
-- El acceso a archivos no sale nunca de `--root` (se resuelven los enlaces y se
-  comprueba la ruta real).
 
 ## Copia de la base de datos
 
-La base de datos es un archivo: cópiala con el servidor parado, o desde el panel
-(página **Servidor** → **Copia de la base**). Las copias `-wal` y `-shm` solo
-hacen falta si el servidor está en marcha.
+La base de datos es un archivo: con el servidor parado copia `<root>/ryx.db`.
+Las copias `-wal` y `-shm` solo hacen falta si el servidor está en marcha.

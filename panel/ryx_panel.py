@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Panel de control de RyxHistory (solo para el PC del dueno).
 
-Ventana con varias secciones (Inicio, Servidores, Servidor, APK), varios
-servidores, conexion con el agente de cada servidor para transferir archivos y
-compilacion del APK contra el servidor activo. Usa el JDK y el SDK de Android
-del equipo: no necesita internet ni tokens.
+Ventana con varias secciones (Inicio, Servidores, Servidor, Registro, APK),
+una consola integrada en Inicio, varios servidores y lectura de la base de datos
+del servidor host (cuentas, mensajes por seccion e imagenes). Compila el APK
+contra el servidor activo con el JDK y el SDK de Android del equipo.
 
 Modos: sin argumentos abre la ventana; --console es el menu de texto;
 --check imprime la configuracion y --selftest comprueba que la ventana se crea.
@@ -12,6 +12,7 @@ Modos: sin argumentos abre la ventana; --console es el menu de texto;
 from __future__ import annotations
 
 import ctypes
+import base64
 import json
 import os
 import queue
@@ -19,6 +20,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -190,26 +192,8 @@ class Node:
     def info(self) -> dict:
         return self.get("/api/info")
 
-    def list(self, path: str = "") -> dict:
-        return self.get("/api/list", path=path)
-
-    def download(self, path: str) -> bytes:
-        return self._open("GET", "/api/download", params={"path": path}, timeout=120)
-
-    def upload(self, path: str, blob: bytes) -> dict:
-        raw = self._open("POST", "/api/upload", data=blob, params={"path": path}, timeout=180)
-        return json.loads(raw.decode("utf-8"))
-
-    def mkdir(self, path: str) -> dict:
-        raw = self._open("POST", "/api/mkdir", data=b"", params={"path": path})
-        return json.loads(raw.decode("utf-8"))
-
-    def delete(self, path: str, recursive: bool = False) -> dict:
-        params = {"path": path}
-        if recursive:
-            params["recursive"] = "1"
-        raw = self._open("POST", "/api/delete", data=b"", params=params)
-        return json.loads(raw.decode("utf-8"))
+    def me(self) -> dict:
+        return self.get("/api/me")
 
     # --- registro de usuarios (base de datos del servidor) ---
 
@@ -580,6 +564,11 @@ class Panel:
         self.remote_path = ""
         self.remote_entries: list = []
         self.users: list = []
+        self.console = None
+        self.registry_section = "mensajes"
+        self.registry_entries: list = []
+        self.registry_view: list = []
+        self.registry_index = 0
         self._state_color = MUTED
         self._pulse = 0
 
@@ -602,7 +591,6 @@ class Panel:
         self._build_header()
         self._build_sidebar()
         self._build_content()
-        self._build_log()
         self.show_page("inicio")
         self.root.after(120, self._drain)
         self._fade_in()
@@ -734,7 +722,7 @@ class Panel:
             row=0, column=1, sticky="sw", pady=(self.px(8), 0)
         )
         tk.Label(
-            header, text="Panel de control · servidores, archivos y APK", bg=CARD, fg=MUTED,
+            header, text="Panel de control · servidores, base de datos y APK", bg=CARD, fg=MUTED,
             font=self.fnt(9),
         ).grid(row=1, column=1, sticky="nw", pady=(0, self.px(8)))
 
@@ -772,19 +760,20 @@ class Panel:
 
     def _build_content(self):
         self.content = tk.Frame(self.root, bg=BG)
-        self.content.grid(row=1, column=1, sticky="nsew", padx=self.px(14), pady=(self.px(14), 0))
+        self.content.grid(row=1, column=1, sticky="nsew", padx=self.px(14),
+                          pady=(self.px(14), self.px(14)))
         self.content.rowconfigure(0, weight=1)
         self.content.columnconfigure(0, weight=1)
 
         self.pages: dict[str, tk.Frame] = {}
-        for key in ("inicio", "servidores", "archivos", "registro", "apk"):
+        for key in ("inicio", "servidores", "servidor", "registro", "apk"):
             page = tk.Frame(self.content, bg=BG)
             page.grid(row=0, column=0, sticky="nsew")
             self.pages[key] = page
 
         self._build_home()
         self._build_servers()
-        self._build_files()
+        self._build_connection()
         self._build_registry()
         self._build_apk()
 
@@ -796,8 +785,8 @@ class Panel:
             self.refresh_home()
         elif key == "servidores":
             self.refresh_servers()
-        elif key == "archivos":
-            self.refresh_files_page()
+        elif key == "servidor":
+            self.refresh_connection()
         elif key == "registro":
             self.refresh_registry()
         elif key == "apk":
@@ -815,20 +804,34 @@ class Panel:
     def _build_home(self):
         page = self.pages["inicio"]
         page.columnconfigure(0, weight=1)
-        page.rowconfigure(3, weight=1)
+        page.rowconfigure(4, weight=1)
 
         top = tk.Frame(page, bg=BG)
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(0, weight=1)
-        self.page_title(top, "Inicio", "Estado de tus servidores y del APK")
+        self.page_title(top, "Inicio", "Servidores, base de datos y APK en un solo sitio")
 
         actions = tk.Frame(top, bg=BG)
         actions.grid(row=0, column=1, rowspan=2, sticky="e", pady=(self.px(6), 0))
-        self.button(actions, "Probar todos", self.probe_all).pack(side="left", padx=(0, self.px(8)))
-        self.button(actions, "Compilar APK", lambda: self.show_page("apk"), kind="primary").pack(side="left")
+        self.button(actions, "Compilar APK", lambda: self.show_page("apk"),
+                    kind="primary").pack(side="left")
+
+        quick = tk.Frame(page, bg=BG)
+        quick.grid(row=1, column=0, sticky="ew", pady=(self.px(12), 0))
+        for texto, accion in (
+            ("Probar servidor", self.probe_active),
+            ("Conectar host", self.connect_node),
+            ("Registro", lambda: self.show_page("registro")),
+            ("Abrir APKs", self.open_out),
+            ("Copiar clave", self.copy_token),
+            ("Limpiar consola", self.clear_console),
+        ):
+            self.button(quick, texto, accion, size=8, padx=12, pady=6).pack(
+                side="left", padx=(0, self.px(6))
+            )
 
         stats = tk.Frame(page, bg=BG)
-        stats.grid(row=1, column=0, sticky="ew", pady=(self.px(14), 0))
+        stats.grid(row=2, column=0, sticky="ew", pady=(self.px(12), 0))
         for column in range(3):
             stats.columnconfigure(column, weight=1, uniform="stat")
         self.stat_servers = self._stat_card(stats, 0, "SERVIDORES")
@@ -836,15 +839,49 @@ class Panel:
         self.stat_apk = self._stat_card(stats, 2, "APK")
 
         subtitle = self.label(page, "SERVIDORES", size=8, color=GOLD, bold=True, bg=BG)
-        subtitle.grid(row=2, column=0, sticky="w", pady=(self.px(16), self.px(6)))
+        subtitle.grid(row=3, column=0, sticky="w", pady=(self.px(14), self.px(6)))
 
         self.home_area = ScrollArea(self, page)
-        self.home_area.grid(row=3, column=0, sticky="nsew")
+        self.home_area.grid(row=4, column=0, sticky="nsew")
         self.home_grid = tk.Frame(self.home_area.body, bg=BG)
         self.home_grid.pack(fill="x")
         self.home_grid.columnconfigure(0, weight=1, uniform="srv")
         self.home_grid.columnconfigure(1, weight=1, uniform="srv")
         self.root.bind_all("<MouseWheel>", self._home_wheel, add="+")
+
+        consola_card, consola = self.card(page, "Consola")
+        consola_card.grid(row=5, column=0, sticky="ew", pady=(self.px(10), 0))
+        caja = RoundedBox(self, consola, fill=LOG_BG, outline=LINE, radius=10, padding=6)
+        caja.pack(fill="both", expand=True)
+        self.console = tk.Text(
+            caja.inner, bg=LOG_BG, fg="#D9CDB4", insertbackground=CREAM, relief="flat", bd=0,
+            font=self.fnt(9, mono=True), wrap="word", height=6, highlightthickness=0,
+            state="disabled",
+        )
+        self.console.pack(fill="both", expand=True)
+        self.console.bind(
+            "<MouseWheel>", lambda event: self.console.yview_scroll(int(-event.delta / 120), "units")
+        )
+
+    def probe_active(self) -> None:
+        server = active_server(self.cfg)
+        if server:
+            self.probe_one(server["url"])
+        else:
+            self.log("No hay servidor configurado.")
+
+    def copy_token(self) -> None:
+        server = active_server(self.cfg)
+        token = (server or {}).get("token", "")
+        if not token:
+            self.log("Ese servidor no tiene clave guardada.")
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(token)
+            self.log("Clave del panel copiada al portapapeles.")
+        except Exception:
+            self.log("No se pudo copiar la clave.")
 
     def _stat_card(self, parent, column: int, title: str):
         frame, body = self.card(parent)
@@ -918,7 +955,7 @@ class Panel:
                 ).pack(side="left", padx=(self.px(8), 0))
             else:
                 self.button(
-                    buttons, "Archivos", lambda: self.show_page("archivos")
+                    buttons, "Conexion", lambda: self.show_page("servidor")
                 ).pack(side="left", padx=(self.px(8), 0))
 
     # --- servidores ---
@@ -976,7 +1013,7 @@ class Panel:
         row2.pack(fill="x", pady=(self.px(8), 0))
         self.button(row2, "Usar este", self.activate_selected).pack(side="left", padx=(0, self.px(8)))
         self.button(row2, "Probar", self.probe_selected).pack(side="left", padx=(0, self.px(8)))
-        self.button(row2, "Archivos", lambda: self.show_page("archivos")).pack(
+        self.button(row2, "Conexion", lambda: self.show_page("servidor")).pack(
             side="left", padx=(0, self.px(8))
         )
         self.button(row2, "Eliminar", self.delete_server, kind="danger").pack(side="left")
@@ -1111,78 +1148,49 @@ class Panel:
         for server in self.cfg["servers"]:
             self.probe_one(server["url"])
 
-    # --- servidor: conexion y archivos ---
+    # --- servidor: conexion con la base de datos ---
 
-    def _build_files(self):
-        page = self.pages["archivos"]
+    def _build_connection(self):
+        page = self.pages["servidor"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
-        self.page_title(page, "Servidor", "Conexion y transferencia de archivos con el servidor.")
+        self.page_title(page, "Servidor", "Conexion con la base de datos del servidor host.")
 
         body = tk.Frame(page, bg=BG)
         body.grid(row=1, column=0, sticky="nsew", pady=(self.px(14), 0))
-        body.columnconfigure(0, weight=0, minsize=self.px(320))
+        body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
-        link_card, link = self.card(body, "Conexion")
-        link_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.px(6)))
-
-        self.link_server = self.label(link, "", size=11, color=CREAM, bold=True)
+        datos_card, datos = self.card(body, "Datos del host")
+        datos_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.px(6)))
+        self.link_server = self.label(datos, "", size=12, color=CREAM, bold=True)
         self.link_server.pack(anchor="w")
-        self.link_url = self.label(link, "", size=9, color=MUTED, mono=True)
-        self.link_url.pack(anchor="w", pady=(self.px(2), self.px(12)))
+        self.link_url = self.label(datos, "", size=9, color=MUTED, mono=True)
+        self.link_url.pack(anchor="w", pady=(self.px(2), self.px(14)))
 
-        self.label(link, "Clave del servidor", size=9, color=MUTED).pack(anchor="w")
-        box, self.link_token = self.field(link, width=16)
-        box.pack(fill="x", pady=(self.px(4), self.px(12)))
+        self.label(datos, "Clave del panel", size=9, color=MUTED).pack(anchor="w")
+        caja, self.link_token = self.field(datos, width=16)
+        caja.pack(fill="x", pady=(self.px(4), self.px(14)))
 
-        row = tk.Frame(link, bg=CARD)
-        row.pack(fill="x")
-        self.connect_button = self.button(row, "Conectar", self.connect_node, kind="primary")
+        fila = tk.Frame(datos, bg=CARD)
+        fila.pack(fill="x")
+        self.connect_button = self.button(fila, "Conectar", self.connect_node, kind="primary")
         self.connect_button.pack(side="left", padx=(0, self.px(8)))
-        self.button(row, "Elegir", lambda: self.show_page("servidores")).pack(side="left")
+        self.button(fila, "Elegir servidor", lambda: self.show_page("servidores")).pack(side="left")
 
-        self.link_status = self.label(link, "●  sin conexion", size=9, color=MUTED)
-        self.link_status.pack(anchor="w", pady=(self.px(14), self.px(4)))
-        self.link_info = self.label(link, "", size=9, color=MUTED)
-        self.link_info.pack(anchor="w")
+        self.link_status = self.label(datos, "●  sin conexion", size=9, color=MUTED)
+        self.link_status.pack(anchor="w", pady=(self.px(18), 0))
 
-        files_card, files = self.card(body, "Archivos")
-        files_card.grid(row=0, column=1, sticky="nsew", padx=(self.px(6), 0))
-        files.columnconfigure(0, weight=1)
-        files.rowconfigure(1, weight=1)
+        estado_card, estado = self.card(body, "Base de datos")
+        estado_card.grid(row=0, column=1, sticky="nsew", padx=(self.px(6), 0))
+        self.link_info = self.label(estado, "", size=10, color=MUTED)
+        self.link_info.pack(anchor="w", pady=(0, self.px(16)))
+        self.button(estado, "Abrir Registro", lambda: self.show_page("registro"),
+                    kind="primary").pack(anchor="w")
+        self.button(estado, "Actualizar", self.connect_node).pack(anchor="w", pady=(self.px(8), 0))
 
-        bar = tk.Frame(files, bg=CARD)
-        bar.grid(row=0, column=0, sticky="ew")
-        bar.columnconfigure(0, weight=1)
-        path_box, self.path_entry = self.field(bar, "/", width=16)
-        path_box.grid(row=0, column=0, sticky="ew")
-        self.path_entry.bind("<Return>", lambda _e: self.goto_path())
-        self.button(bar, "Ir", self.goto_path).grid(row=0, column=1, padx=(self.px(6), 0))
-        self.button(bar, "Arriba", self.go_up).grid(row=0, column=2, padx=(self.px(6), 0))
-        self.button(bar, "Actualizar", self.refresh_files).grid(row=0, column=3, padx=(self.px(6), 0))
-
-        list_box = RoundedBox(self, files, fill=LOG_BG, outline=LINE, radius=10, padding=6)
-        list_box.grid(row=1, column=0, sticky="nsew", pady=(self.px(10), 0))
-        self.file_list = tk.Listbox(
-            list_box.inner, bg=LOG_BG, fg=CREAM, selectbackground=GOLD, selectforeground=INK,
-            bd=0, highlightthickness=0, font=self.fnt(9, mono=True), activestyle="none",
-        )
-        self.file_list.pack(fill="both", expand=True)
-        self.file_list.bind("<Double-Button-1>", self.open_selected)
-
-        actions = tk.Frame(files, bg=CARD)
-        actions.grid(row=2, column=0, sticky="ew", pady=(self.px(10), 0))
-        self.button(actions, "Subir archivo", self.upload_file, kind="primary").pack(
-            side="left", padx=(0, self.px(8))
-        )
-        self.button(actions, "Descargar", self.download_selected).pack(side="left", padx=(0, self.px(8)))
-        self.button(actions, "Nueva carpeta", self.make_dir).pack(side="left", padx=(0, self.px(8)))
-        self.button(actions, "Copia de la base", self.go_databases).pack(side="left", padx=(0, self.px(8)))
-        self.button(actions, "Borrar", self.delete_selected, kind="danger").pack(side="left")
-
-    def refresh_files_page(self) -> None:
+    def refresh_connection(self) -> None:
         server = active_server(self.cfg)
         if not server:
             self.link_server.config(text="Sin servidor")
@@ -1193,8 +1201,7 @@ class Panel:
         self.link_token.insert(0, server.get("token", ""))
         if self.node is None:
             self.link_status.config(text="●  sin conexion", fg=MUTED)
-            if self.file_list.size() == 0:
-                self.file_list.insert("end", "   Conecta con el servidor para ver sus archivos")
+            self.link_info.config(text="Conecta con el host para ver la base de datos.")
 
     def connect_node(self) -> None:
         server = active_server(self.cfg)
@@ -1213,29 +1220,25 @@ class Panel:
 
             def done() -> None:
                 self.node = node
-                self.remote_path = ""
                 self.connect_button.set(text="Conectar", state="normal")
                 self.link_status.config(text=f"●  conectado · {node.base}", fg=GREEN)
                 database = info.get("database") or {}
-                self.link_info.config(
-                    text=(
-                        f"{info.get('node') or name}\n"
-                        f"{info.get('system', '')}\n"
-                        f"disco libre: {human_size(info.get('disk_free', 0))}\n"
-                        f"base de datos: {database.get('users', 0)} usuarios · "
-                        f"{database.get('notifications', 0)} notifs\n"
-                        f"discord: {'activo' if info.get('discord') else 'sin configurar'}\n"
-                        f"bases de datos en disco: {len(info.get('databases') or [])}"
-                    )
-                )
+                lineas = [
+                    f"Nodo: {info.get('node') or name}",
+                    f"Sistema: {info.get('system', '')}",
+                    f"Disco libre: {human_size(info.get('disk_free', 0))}",
+                    f"Cuentas: {database.get('users', 0)}",
+                    f"Notificaciones: {database.get('notifications', 0)}",
+                    f"Base de datos: {human_size(database.get('size', 0))}",
+                    f"Discord: {'activo' if info.get('discord') else 'sin configurar'}",
+                ]
+                self.link_info.config(text="\n".join(lineas))
                 self.log(f"Conectado a {name} · {node.base}")
                 self.log(
-                    f"  Discord: {'activo' if info.get('discord') else 'sin configurar'}"
-                    f" · {database.get('users', 0)} cuentas · {database.get('notifications', 0)} notificaciones"
+                    f"  {database.get('users', 0)} cuentas · "
+                    f"{database.get('notifications', 0)} notificaciones"
                 )
-                for item in (info.get("databases") or [])[:6]:
-                    self.log(f"  base: {item['name']}  ({human_size(item['size'])})")
-                self.refresh_files()
+                self.load_users()
 
             self.ui(done)
 
@@ -1250,196 +1253,20 @@ class Panel:
 
         self.run_bg(work, failed)
 
-    def refresh_files(self) -> None:
-        node = self.node
-        if node is None:
-            self.log("Conecta primero con el servidor.")
-            return
-        path = self.remote_path
-
-        def work() -> None:
-            payload = node.list(path)
-
-            def done() -> None:
-                self.remote_path = payload.get("path", "")
-                shown = "/" + self.remote_path if self.remote_path else "/"
-                self.path_entry.delete(0, "end")
-                self.path_entry.insert(0, shown)
-                self.remote_entries = payload.get("entries") or []
-                self.file_list.delete(0, "end")
-                if not self.remote_entries:
-                    self.file_list.insert("end", "   Carpeta vacia")
-                for entry in self.remote_entries:
-                    if entry["dir"]:
-                        self.file_list.insert("end", f"[carpeta]  {entry['name']}")
-                    else:
-                        self.file_list.insert("end", f"{entry['name']}   ·   {human_size(entry['size'])}")
-
-            self.ui(done)
-
-        self.run_bg(work, lambda message: self.log(f"Error al listar: {message}"))
-
-    def _selected_file(self):
-        selection = self.file_list.curselection()
-        if not selection:
-            self.log("Selecciona un archivo de la lista.")
-            return None
-        index = selection[0]
-        if index >= len(self.remote_entries):
-            return None
-        return self.remote_entries[index]
-
-    def open_selected(self, _event=None) -> None:
-        entry = self._selected_file()
-        if not entry:
-            return
-        if entry["dir"]:
-            self.remote_path = join_remote(self.remote_path, entry["name"])
-            self.refresh_files()
-        else:
-            self.download_selected()
-
-    def goto_path(self) -> None:
-        self.remote_path = self.path_entry.get().strip().strip("/")
-        self.refresh_files()
-
-    def go_up(self) -> None:
-        self.remote_path = parent_remote(self.remote_path)
-        self.refresh_files()
-
-    def go_databases(self) -> None:
-        node = self.node
-        if node is None:
-            self.log("Conecta primero con el servidor.")
-            return
-
-        def work() -> None:
-            info = node.info()
-            databases = info.get("databases") or []
-
-            def done() -> None:
-                if not databases:
-                    self.log("No hay ninguna base de datos en la raiz del servidor.")
-                    return
-                base = max(databases, key=lambda item: item.get("size") or 0)
-                target = filedialog.asksaveasfilename(
-                    initialfile=base["name"], title="Guardar una copia de la base de datos"
-                )
-                if not target:
-                    return
-
-                def copia() -> None:
-                    blob = node.download(base["name"])
-                    Path(target).write_bytes(blob)
-                    self.ui(lambda: self.log(
-                        f"Copia de {base['name']} guardada ({human_size(len(blob))})"
-                    ))
-
-                self.run_bg(copia, lambda message: self.log(f"Error al copiar: {message}"))
-
-            self.ui(done)
-
-        self.run_bg(work, lambda message: self.log(f"Error: {message}"))
-
-    def download_selected(self) -> None:
-        entry = self._selected_file()
-        node = self.node
-        if not entry or node is None:
-            return
-        if entry["dir"]:
-            self.log("Eso es una carpeta: entra en ella para descargar sus archivos.")
-            return
-        target = filedialog.asksaveasfilename(initialfile=entry["name"], title="Guardar archivo")
-        if not target:
-            return
-        remote = join_remote(self.remote_path, entry["name"])
-
-        def work() -> None:
-            blob = node.download(remote)
-            Path(target).write_bytes(blob)
-
-            def done() -> None:
-                self.log(f"Descargado {entry['name']} ({human_size(len(blob))}) -> {target}")
-
-            self.ui(done)
-
-        self.run_bg(work, lambda message: self.log(f"Error al descargar: {message}"))
-
-    def upload_file(self) -> None:
-        node = self.node
-        if node is None:
-            self.log("Conecta primero con el servidor.")
-            return
-        source = filedialog.askopenfilename(title="Archivo para subir al servidor")
-        if not source:
-            return
-        blob = Path(source).read_bytes()
-        remote = join_remote(self.remote_path, Path(source).name)
-        self.log(f"Subiendo {Path(source).name} ({human_size(len(blob))}) ...")
-
-        def work() -> None:
-            node.upload(remote, blob)
-
-            def done() -> None:
-                self.log(f"Subido a {remote}")
-                self.refresh_files()
-
-            self.ui(done)
-
-        self.run_bg(work, lambda message: self.log(f"Error al subir: {message}"))
-
-    def make_dir(self) -> None:
-        node = self.node
-        if node is None:
-            self.log("Conecta primero con el servidor.")
-            return
-        name = simpledialog.askstring("Nueva carpeta", "Nombre de la carpeta:", parent=self.root)
-        if not name:
-            return
-        remote = join_remote(self.remote_path, name)
-
-        def work() -> None:
-            node.mkdir(remote)
-
-            def done() -> None:
-                self.log(f"Carpeta creada: {remote}")
-                self.refresh_files()
-
-            self.ui(done)
-
-        self.run_bg(work, lambda message: self.log(f"Error al crear carpeta: {message}"))
-
-    def delete_selected(self) -> None:
-        entry = self._selected_file()
-        node = self.node
-        if not entry or node is None:
-            return
-        remote = join_remote(self.remote_path, entry["name"])
-        if not messagebox.askyesno("Borrar", f"¿Borrar {remote} del servidor?", parent=self.root):
-            return
-
-        def work() -> None:
-            node.delete(remote, recursive=bool(entry["dir"]))
-
-            def done() -> None:
-                self.log(f"Borrado: {remote}")
-                self.refresh_files()
-
-            self.ui(done)
-
-        self.run_bg(work, lambda message: self.log(f"Error al borrar: {message}"))
-
     # --- registro: cuentas e historial de la base de datos ---
 
     def _build_registry(self):
         page = self.pages["registro"]
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
-        self.page_title(page, "Registro", "Cuentas de la base de datos y todo su historial de notificaciones.")
+        self.page_title(
+            page, "Registro",
+            "Cada cuenta con sus mensajes, sus imagenes y el resumen por aplicacion.",
+        )
 
         body = tk.Frame(page, bg=BG)
         body.grid(row=1, column=0, sticky="nsew", pady=(self.px(14), 0))
-        body.columnconfigure(0, weight=0, minsize=self.px(300))
+        body.columnconfigure(0, weight=0, minsize=self.px(280))
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
@@ -1459,35 +1286,79 @@ class Panel:
         self.user_list = tk.Listbox(
             lista.inner, bg=LOG_BG, fg=CREAM, selectbackground=GOLD, selectforeground=INK,
             bd=0, highlightthickness=0, font=self.fnt(9), activestyle="none",
+            exportselection=False,
         )
         self.user_list.pack(fill="both", expand=True)
         self.user_list.bind("<<ListboxSelect>>", lambda _e: self.load_user_notifications())
 
-        hist_card, hist = self.card(body, "Historial del usuario")
+        hist_card, hist = self.card(body, "Perfil del usuario")
         hist_card.grid(row=0, column=1, sticky="nsew", padx=(self.px(6), 0))
         hist.columnconfigure(0, weight=1)
         hist.rowconfigure(3, weight=1)
 
-        self.registry_user = self.label(hist, "Selecciona una cuenta", size=11, color=CREAM, bold=True)
+        self.registry_user = self.label(hist, "Selecciona una cuenta", size=12, color=CREAM, bold=True)
         self.registry_user.grid(row=0, column=0, sticky="w")
         self.registry_meta = self.label(hist, "", size=9, color=MUTED)
         self.registry_meta.grid(row=1, column=0, sticky="w", pady=(self.px(2), self.px(10)))
 
-        bar = tk.Frame(hist, bg=CARD)
-        bar.grid(row=2, column=0, sticky="ew")
-        bar.columnconfigure(0, weight=1)
-        search_box, self.registry_query = self.field(bar, "", width=14)
-        search_box.grid(row=0, column=0, sticky="ew")
-        self.registry_query.bind("<Return>", lambda _e: self.load_user_notifications())
-        self.button(bar, "Buscar", self.load_user_notifications).grid(row=0, column=1, padx=(self.px(6), 0))
+        tabs = tk.Frame(hist, bg=CARD)
+        tabs.grid(row=2, column=0, sticky="ew")
+        self.registry_tabs = {}
+        for clave, texto in (("mensajes", "Mensajes"), ("imagenes", "Con imagen"), ("apps", "Por app")):
+            boton = self.button(
+                tabs, texto, lambda k=clave: self.set_registry_section(k),
+                kind="primary" if clave == self.registry_section else "ghost",
+                size=8, padx=12, pady=6,
+            )
+            boton.pack(side="left", padx=(0, self.px(6)))
+            self.registry_tabs[clave] = boton
 
-        historial = RoundedBox(self, hist, fill=LOG_BG, outline=LINE, radius=10, padding=6)
-        historial.grid(row=3, column=0, sticky="nsew", pady=(self.px(10), 0))
+        busqueda = tk.Frame(hist, bg=CARD)
+        busqueda.grid(row=3, column=0, sticky="new", pady=(self.px(10), 0))
+        busqueda.columnconfigure(0, weight=1)
+        caja, self.registry_query = self.field(busqueda, "", width=14)
+        caja.grid(row=0, column=0, sticky="ew")
+        self.registry_query.bind("<Return>", lambda _e: self.load_user_notifications())
+        self.button(busqueda, "Buscar", self.load_user_notifications).grid(
+            row=0, column=1, padx=(self.px(6), 0)
+        )
+
+        cuerpo = tk.Frame(hist, bg=CARD)
+        cuerpo.grid(row=4, column=0, sticky="nsew", pady=(self.px(10), 0))
+        hist.rowconfigure(4, weight=1)
+        cuerpo.columnconfigure(0, weight=1)
+        cuerpo.rowconfigure(0, weight=1)
+
+        lista2 = RoundedBox(self, cuerpo, fill=LOG_BG, outline=LINE, radius=10, padding=6)
+        lista2.grid(row=0, column=0, sticky="nsew")
         self.registry_list = tk.Listbox(
-            historial.inner, bg=LOG_BG, fg=CREAM, selectbackground=RAISED, selectforeground=CREAM,
+            lista2.inner, bg=LOG_BG, fg=CREAM, selectbackground=RAISED, selectforeground=CREAM,
             bd=0, highlightthickness=0, font=self.fnt(9, mono=True), activestyle="none",
+            exportselection=False,
         )
         self.registry_list.pack(fill="both", expand=True)
+        self.registry_list.bind("<<ListboxSelect>>", lambda _e: self.show_entry())
+
+        preview = RoundedBox(self, cuerpo, fill=CARD, outline=LINE, radius=10, padding=8)
+        preview.grid(row=1, column=0, sticky="ew", pady=(self.px(8), 0))
+        self.registry_preview = tk.Text(
+            preview.inner, bg=CARD, fg=CREAM, relief="flat", bd=0, wrap="word",
+            font=self.fnt(9), height=4, highlightthickness=0, state="disabled",
+        )
+        self.registry_preview.pack(fill="both", expand=True)
+
+        acciones = tk.Frame(cuerpo, bg=CARD)
+        acciones.grid(row=2, column=0, sticky="ew", pady=(self.px(8), 0))
+        self.image_button = self.button(acciones, "Ver imagen", self.view_image, kind="primary")
+        self.image_button.pack(side="left", padx=(0, self.px(8)))
+        self.image_button.set(state="disabled")
+        self.button(acciones, "Copiar mensaje", self.copy_entry).pack(side="left")
+
+    def set_registry_section(self, clave: str) -> None:
+        self.registry_section = clave
+        for nombre, boton in self.registry_tabs.items():
+            boton.fade_to("primary" if nombre == clave else "ghost")
+        self.load_user_notifications()
 
     def refresh_registry(self) -> None:
         if self.node is None:
@@ -1511,12 +1382,16 @@ class Panel:
 
             def done() -> None:
                 self.users = payload.get("users") or []
+                self.registry_index = 0
                 self.user_list.delete(0, "end")
                 self.registry_count.config(text=f"{len(self.users)} cuenta(s)", fg=MUTED)
                 for user in self.users:
                     nombre = user.get("name") or "—"
                     correo = user.get("email") or "sin correo"
-                    self.user_list.insert("end", f"{nombre} · {correo}  ({user.get('notifications', 0)})")
+                    marca = " · discord" if user.get("discord") else ""
+                    self.user_list.insert(
+                        "end", f"{nombre} · {correo}{marca}  ({user.get('notifications', 0)})"
+                    )
                 if not self.users:
                     self.user_list.insert("end", "   Todavia no hay cuentas")
                     self.registry_user.config(text="Sin cuentas")
@@ -1535,9 +1410,11 @@ class Panel:
         if node is None:
             return
         selection = self.user_list.curselection()
-        if not selection or selection[0] >= len(self.users):
+        index = selection[0] if selection else self.registry_index
+        if index >= len(self.users):
             return
-        user = self.users[selection[0]]
+        self.registry_index = index
+        user = self.users[index]
         query = self.registry_query.get().strip()
 
         def work() -> None:
@@ -1550,27 +1427,120 @@ class Panel:
                 self.registry_meta.config(
                     text=(
                         f"{user.get('email') or 'sin correo'}  ·  "
-                        f"discord: {'si' if user.get('discord') else 'no'}  ·  "
+                        f"discord: {'vinculado' if user.get('discord') else 'no'}  ·  "
                         f"alta {fecha}  ·  {payload.get('count', 0)} notificaciones"
                     )
                 )
-                self.registry_list.delete(0, "end")
-                for item in payload.get("notifications") or []:
-                    posted = item.get("posted_at") or 0
-                    hora = time.strftime("%d/%m %H:%M", time.localtime(posted / 1000)) if posted else "—"
-                    titulo = item.get("title") or ""
-                    texto = item.get("text") or ""
-                    resumen = " — ".join(part for part in (titulo, texto) if part) or "(sin texto)"
-                    self.registry_list.insert(
-                        "end",
-                        f"{hora}  {(item.get('app') or item.get('package') or '?')[:18]:<18}  {resumen[:120]}",
-                    )
-                if not payload.get("notifications"):
-                    self.registry_list.insert("end", "   Esta cuenta no tiene notificaciones")
+                self.registry_entries = payload.get("notifications") or []
+                self.fill_registry_list()
+                if self.registry_list.size():
+                    self.registry_list.selection_set(0)
+                    self.show_entry()
 
             self.ui(done)
 
         self.run_bg(work, lambda message: self.log(f"Historial: {message}"))
+
+    def fill_registry_list(self) -> None:
+        self.registry_list.delete(0, "end")
+        self.registry_view = []
+        kind = self.registry_section
+
+        if kind == "apps":
+            counts: dict = {}
+            for item in self.registry_entries:
+                clave = (item.get("app") or item.get("package") or "?", item.get("package") or "")
+                datos = counts.setdefault(clave, {"total": 0, "ultimo": item})
+                datos["total"] += 1
+                if (item.get("posted_at") or 0) > (datos["ultimo"].get("posted_at") or 0):
+                    datos["ultimo"] = item
+            for (app, paquete), datos in sorted(counts.items(), key=lambda kv: -kv[1]["total"]):
+                self.registry_view.append({"kind": "app", "app": app, "package": paquete, **datos})
+                self.registry_list.insert("end", f"{app:<22} {datos['total']:>4} mensajes   ·  {paquete}")
+            if not self.registry_view:
+                self.registry_list.insert("end", "   Esta cuenta no tiene mensajes")
+            return
+
+        for item in self.registry_entries:
+            if kind == "imagenes" and not item.get("image"):
+                continue
+            posted = item.get("posted_at") or 0
+            hora = time.strftime("%d/%m %H:%M", time.localtime(posted / 1000)) if posted else "—"
+            titulo = item.get("title") or ""
+            app = (item.get("app") or item.get("package") or "?")[:16]
+            icono = " [img]" if item.get("image") else ""
+            self.registry_view.append({"kind": "nota", **item})
+            self.registry_list.insert("end", f"{hora}  {app:<16}  {titulo[:60]}{icono}")
+        if not self.registry_view:
+            vacio = "Esta cuenta no tiene imagenes" if kind == "imagenes" else "Esta cuenta no tiene mensajes"
+            self.registry_list.insert("end", f"   {vacio}")
+
+    def _selected_entry(self):
+        selection = self.registry_list.curselection()
+        index = selection[0] if selection else 0
+        if index >= len(self.registry_view):
+            return None
+        return self.registry_view[index]
+
+    def show_entry(self) -> None:
+        entry = self._selected_entry()
+        self.registry_preview.configure(state="normal")
+        self.registry_preview.delete("1.0", "end")
+        if entry is None:
+            self.registry_preview.configure(state="disabled")
+            self.image_button.set(state="disabled")
+            return
+        if entry.get("kind") == "app":
+            self.registry_preview.insert("end", f"{entry['app']}\n")
+            self.registry_preview.insert("end", f"{entry['total']} mensajes guardados\n")
+            self.registry_preview.insert(
+                "end", f"Ultimo: {entry['ultimo'].get('title') or '(sin titulo)'}\n"
+            )
+            self.registry_preview.insert("end", f"Paquete: {entry['package']}")
+            self.image_button.set(state="disabled")
+        else:
+            cuerpo = entry.get("big") or entry.get("text") or entry.get("sub") or "(sin texto)"
+            self.registry_preview.insert("end", f"{entry.get('title') or ''}\n")
+            self.registry_preview.insert("end", f"{cuerpo}\n\n")
+            self.registry_preview.insert(
+                "end",
+                f"{entry.get('app') or ''} · {entry.get('package') or ''} · "
+                f"{entry.get('category') or 'sin categoria'}",
+            )
+            self.image_button.set(state="normal" if entry.get("image") else "disabled")
+        self.registry_preview.configure(state="disabled")
+
+    def view_image(self) -> None:
+        entry = self._selected_entry()
+        if not entry or not entry.get("image"):
+            return
+        try:
+            blob = base64.b64decode(entry["image"])
+            folder = Path(tempfile.gettempdir()) / "ryx-imagenes"
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / f"{entry.get('uuid') or 'imagen'}.png"
+            target.write_bytes(blob)
+            os.startfile(str(target))  # type: ignore[attr-defined]
+            self.log(f"Imagen abierta: {target.name}")
+        except Exception as error:
+            self.log(f"No se pudo abrir la imagen: {error}")
+
+    def copy_entry(self) -> None:
+        entry = self._selected_entry()
+        if not entry or entry.get("kind") == "app":
+            return
+        texto = "\n".join(
+            parte for parte in (
+                entry.get("title") or "", entry.get("big") or entry.get("text") or "",
+                f"{entry.get('app') or ''} · {time.strftime('%d/%m/%Y %H:%M', time.localtime((entry.get('posted_at') or 0) / 1000))}",
+            ) if parte
+        )
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(texto)
+            self.log("Mensaje copiado al portapapeles.")
+        except Exception:
+            self.log("No se pudo copiar el mensaje.")
 
     # --- APK ---
 
@@ -1661,34 +1631,22 @@ class Panel:
         except Exception:
             self.log(f"Carpeta: {folder}")
 
-    # --------------------------------- registro ------------------------------
+    # --------------------------------- consola ------------------------------
 
-    def _build_log(self):
-        frame = tk.Frame(self.root, bg=BG)
-        frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=self.px(16), pady=(self.px(12), self.px(14)))
-        frame.columnconfigure(0, weight=1)
+    def clear_console(self) -> None:
+        if self.console is None:
+            return
+        self.console.configure(state="normal")
+        self.console.delete("1.0", "end")
+        self.console.configure(state="disabled")
 
-        header = tk.Frame(frame, bg=BG)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, self.px(5)))
-        self.label(header, "REGISTRO", size=8, color=GOLD, bold=True, bg=BG).pack(side="left")
-        self.button(header, "Limpiar", self.clear_log).pack(side="right")
-
-        box = RoundedBox(self, frame, fill=LOG_BG, outline=LINE, radius=12, padding=8)
-        box.grid(row=1, column=0, sticky="ew")
-        self.log_text = tk.Text(
-            box.inner, bg=LOG_BG, fg="#D9CDB4", insertbackground=CREAM, relief="flat", bd=0,
-            font=self.fnt(9, mono=True), wrap="word", height=5, highlightthickness=0,
-        )
-        self.log_text.configure(state="disabled")
-        self.log_text.pack(fill="both", expand=True)
-        self.log_text.bind(
-            "<MouseWheel>", lambda event: self.log_text.yview_scroll(int(-event.delta / 120), "units")
-        )
-
-    def clear_log(self) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
+    def write_console(self, message: str) -> None:
+        if self.console is None:
+            return
+        self.console.configure(state="normal")
+        self.console.insert("end", f"{time.strftime('%H:%M:%S')}  {message}\n")
+        self.console.configure(state="disabled")
+        self.console.see("end")
 
     def _drain(self) -> None:
         try:
@@ -1700,18 +1658,11 @@ class Panel:
                     self.messages.put(f"Error interno: {error}")
         except queue.Empty:
             pass
-        wrote = False
         try:
             while True:
-                message = self.messages.get_nowait()
-                self.log_text.configure(state="normal")
-                self.log_text.insert("end", message + "\n")
-                wrote = True
+                self.write_console(self.messages.get_nowait())
         except queue.Empty:
             pass
-        if wrote:
-            self.log_text.see("end")
-            self.log_text.configure(state="disabled")
         self.root.after(120, self._drain)
 
 

@@ -43,7 +43,6 @@ APP = "RyxHistory"
 VERSION = "1.1.0"
 STARTED = time.time()
 DB_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db3", ".realm", ".mdb", ".accdb", ".sql", ".dump")
-MAX_UPLOAD = 512 * 1024 * 1024
 MAX_BATCH = 500
 ACCESS_TTL = 30 * 24 * 3600
 REFRESH_TTL = 180 * 24 * 3600
@@ -116,6 +115,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     channel      TEXT,
     posted_at    INTEGER NOT NULL,
     created_at   INTEGER NOT NULL,
+    image        TEXT,
     PRIMARY KEY (user_id, uuid)
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, posted_at);
@@ -132,6 +132,11 @@ CREATE TABLE IF NOT EXISTS login_codes (
     user_id    TEXT NOT NULL,
     expires    INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS link_codes (
+    code       TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    expires    INTEGER NOT NULL
+);
 """
 
 
@@ -144,6 +149,10 @@ class Store:
         self.lock = threading.Lock()
         with self._connect() as con:
             con.executescript(SCHEMA)
+            # Bases creadas antes de guardar imagenes: se anade la columna sin perder nada.
+            columnas = {row[1] for row in con.execute("PRAGMA table_info(notifications)")}
+            if "image" not in columnas:
+                con.execute("ALTER TABLE notifications ADD COLUMN image TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(str(self.path), timeout=20)
@@ -270,15 +279,16 @@ class Store:
                 uuid_text = str(item.get("uuid") or "").strip()
                 if not uuid_text:
                     continue
+                image = str(item.get("image") or "")[:300_000] or None
                 con.execute(
                     "INSERT OR IGNORE INTO notifications (user_id, uuid, package_name, app_name, title, text, "
-                    "sub_text, big_text, category, channel, posted_at, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "sub_text, big_text, category, channel, posted_at, created_at, image) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         user_id, uuid_text[:120], str(item.get("packageName") or "")[:200],
                         str(item.get("appName") or "")[:200], item.get("title"), item.get("text"),
                         item.get("subText"), item.get("bigText"), item.get("category"),
-                        item.get("channelId"), int(item.get("postedAt") or stamp), stamp,
+                        item.get("channelId"), int(item.get("postedAt") or stamp), stamp, image,
                     ),
                 )
                 accepted.append(uuid_text)
@@ -349,7 +359,7 @@ class Store:
         query = (query or "").strip()
         sql = (
             "SELECT uuid, package_name, app_name, title, text, sub_text, big_text, category, "
-            "channel, posted_at FROM notifications WHERE user_id = ?"
+            "channel, posted_at, image FROM notifications WHERE user_id = ?"
         )
         params: list = [user_id]
         if query:
@@ -374,9 +384,41 @@ class Store:
                 "category": row["category"],
                 "channel": row["channel"],
                 "posted_at": row["posted_at"],
+                "image": row["image"],
             }
             for row in rows
         ]
+
+    def apps_summary(self, user_id: str) -> list:
+        with self.lock, self._connect() as con:
+            rows = con.execute(
+                "SELECT app_name, package_name, COUNT(*) AS total, MAX(posted_at) AS last "
+                "FROM notifications WHERE user_id = ? GROUP BY app_name, package_name "
+                "ORDER BY total DESC",
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- vincular Discord a una cuenta que entro con correo ---
+
+    def save_link_code(self, user_id: str) -> str:
+        code = secrets.token_urlsafe(24)
+        with self.lock, self._connect() as con:
+            con.execute(
+                "INSERT INTO link_codes (code, user_id, expires) VALUES (?, ?, ?)",
+                (code, user_id, _now() + CODE_TTL),
+            )
+        return code
+
+    def take_link_code(self, code: str) -> str | None:
+        with self.lock, self._connect() as con:
+            row = con.execute("SELECT * FROM link_codes WHERE code = ?", (code,)).fetchone()
+            if not row:
+                return None
+            con.execute("DELETE FROM link_codes WHERE code = ?", (code,))
+            if row["expires"] < _now():
+                return None
+            return row["user_id"]
 
 
 class Limitador:
@@ -409,28 +451,6 @@ class Limitador:
 
 LIMITES = Limitador()
 MAX_JSON = 4 * 1024 * 1024
-
-
-def _databases(root: Path) -> list:
-    found: list = []
-    for path in sorted(root.rglob("*")):
-        if len(found) >= 200:
-            break
-        try:
-            if not path.is_file() or path.suffix.lower() not in DB_SUFFIXES:
-                continue
-            stat = path.stat()
-        except OSError:
-            continue
-        found.append(
-            {
-                "name": path.name,
-                "path": path.relative_to(root).as_posix(),
-                "size": stat.st_size,
-                "modified": int(stat.st_mtime),
-            }
-        )
-    return found
 
 
 def _disk() -> tuple:
@@ -669,6 +689,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "La cuenta ya no existe")
         return self._json(self._session_payload(user))
 
+    def _me(self):
+        user = self._require_user()
+        if user is None:
+            return
+        row = self.store.user_by_id(user["id"]) or {}
+        self._json({
+            "ok": True,
+            "user": {
+                "id": user["id"],
+                "name": row.get("name") or "",
+                "email": row.get("email") or "",
+                "discord": bool(row.get("discord_id")),
+                "created_at": row.get("created_at") or 0,
+                "notifications": self.store.count_notifications(user["id"]),
+            },
+        })
+
+    def _discord_link(self):
+        user = self._require_user()
+        if user is None:
+            return
+        if not self._discord_ready():
+            return self._error(503, "El servidor no tiene Discord configurado")
+        code = self.store.save_link_code(user["id"])
+        redirect_uri = self._base_url() + "/auth/discord/callback"
+        self._json({
+            "ok": True,
+            "url": discord_authorize_url(self.discord_id, redirect_uri, f"link:{code}"),
+        })
+
     def _sync(self):
         user = self._require_user()
         if user is None:
@@ -744,6 +794,26 @@ class Handler(BaseHTTPRequestHandler):
         username = str(profile.get("global_name") or profile.get("username") or "Discord")
         email = str(profile.get("email") or "").strip().lower()
 
+        if app_state.startswith("link:"):
+            user_id = self.store.take_link_code(app_state[5:])
+            if not user_id:
+                return self._html(
+                    "El enlace caduco", "Toca de nuevo «Vincular Discord» en la app.", 400
+                )
+            other = self.store.user_by_discord(discord_id)
+            if other and other["id"] != user_id:
+                return self._html(
+                    "Esa cuenta de Discord ya esta en uso",
+                    "Entra con esa cuenta de Discord o usa otra.",
+                    409,
+                )
+            self.store.link_discord(user_id, discord_id)
+            self.log_message("discord vinculado a la cuenta %s", user_id[:8])
+            self._redirect(
+                f"{DEEP_LINK}?linked=1&state={urllib.parse.quote(app_state)}"
+            )
+            return
+
         user = self.store.user_by_discord(discord_id)
         if not user and email:
             existing = self.store.user_by_email(email)
@@ -775,30 +845,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------ rutas de archivos -------------------------
 
-    def _target(self, raw: str) -> Path:
-        clean = urllib.parse.unquote(raw or "").strip().replace("\\", "/").lstrip("/")
-        target = (self.root / clean).resolve()
-        if target != self.root and self.root not in target.parents:
-            raise PermissionError("Ruta fuera de la carpeta del servidor")
-        return target
-
-    def _relative(self, target: Path) -> str:
-        try:
-            rel = target.relative_to(self.root).as_posix()
-        except ValueError:
-            return ""
-        return "" if rel == "." else rel
-
     def _ping(self):
         self._json({"ok": True, "app": APP, "node": self.node, "version": VERSION})
 
     def _info(self):
         total, free = _disk()
-        # Sin rutas absolutas ni nombres de carpeta: el panel solo necesita numeros.
-        databases = [
-            {"name": item["name"], "size": item["size"], "modified": item["modified"]}
-            for item in _databases(self.root)
-        ]
+        # Sin rutas ni carpetas: el panel solo necesita numeros.
         payload = {
             "ok": True,
             "app": APP,
@@ -809,7 +861,6 @@ class Handler(BaseHTTPRequestHandler):
             "uptime": int(time.time() - STARTED),
             "disk_total": total,
             "disk_free": free,
-            "databases": databases,
             "database": self.store.public_stats() if self.store else {},
             "discord": bool(self.discord_id and self.discord_secret),
         }
@@ -833,111 +884,6 @@ class Handler(BaseHTTPRequestHandler):
             limite = 200
         items = self.store.user_notifications(user_id, self._query("q"), limite)
         self._json({"ok": True, "user": user, "count": len(items), "notifications": items})
-
-    def _file_route(self, route: str, post: bool) -> bool:
-        if not self._token_ok():
-            self._error(401, "Clave del servidor incorrecta o ausente")
-            return True
-        if route == "/api/info" and not post:
-            self._info()
-            return True
-        if route == "/api/admin/users" and not post:
-            self._admin_users()
-            return True
-        if route == "/api/admin/notifications" and not post:
-            self._admin_notifications()
-            return True
-        if route == "/api/list" and not post:
-            target = self._target(self._query("path"))
-            if not target.exists():
-                self._error(404, "Esa carpeta no existe")
-                return True
-            if not target.is_dir():
-                self._error(400, "No es una carpeta")
-                return True
-            entries = []
-            for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-                try:
-                    stat = child.stat()
-                except OSError:
-                    continue
-                entries.append(
-                    {
-                        "name": child.name,
-                        "dir": child.is_dir(),
-                        "size": stat.st_size,
-                        "modified": int(stat.st_mtime),
-                    }
-                )
-            self._json({"ok": True, "path": self._relative(target), "entries": entries})
-            return True
-        if route == "/api/download" and not post:
-            target = self._target(self._query("path"))
-            if not target.is_file():
-                self._error(404, "Ese archivo no existe")
-                return True
-            data = target.read_bytes()
-            self._send(
-                200, data, "application/octet-stream",
-                {"Content-Disposition": f'attachment; filename="{target.name}"'},
-            )
-            return True
-        if route == "/api/upload" and post:
-            target = self._target(self._query("path"))
-            length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0:
-                self._error(400, "El archivo llego vacio")
-                return True
-            if length > MAX_UPLOAD:
-                self._error(413, "El archivo es demasiado grande")
-                return True
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temp = target.with_name(target.name + ".ryx-part")
-            remaining = length
-            with temp.open("wb") as handle:
-                while remaining > 0:
-                    chunk = self.rfile.read(min(256 * 1024, remaining))
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    remaining -= len(chunk)
-            temp.replace(target)
-            self._json({"ok": True, "path": self._relative(target), "size": target.stat().st_size})
-            return True
-        if route == "/api/mkdir" and post:
-            target = self._target(self._query("path"))
-            target.mkdir(parents=True, exist_ok=True)
-            self._json({"ok": True, "path": self._relative(target)})
-            return True
-        if route == "/api/delete" and post:
-            target = self._target(self._query("path"))
-            if target == self.root:
-                self._error(400, "No se puede borrar la carpeta del servidor")
-                return True
-            if not target.exists():
-                self._error(404, "Ese archivo no existe")
-                return True
-            if target.is_dir():
-                if self._query("recursive") == "1":
-                    shutil.rmtree(target)
-                else:
-                    target.rmdir()
-            else:
-                target.unlink()
-            self._json({"ok": True})
-            return True
-        if route == "/api/rename" and post:
-            source = self._target(self._query("path"))
-            destination = self._target(self._query("to"))
-            if not source.exists():
-                self._error(404, "Ese archivo no existe")
-                return True
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            source.replace(destination)
-            self._json({"ok": True, "path": self._relative(destination)})
-            return True
-        self._error(404, "Ruta desconocida")
-        return True
 
     def _limpio(self, text) -> str:
         """Nunca devolver rutas del disco en un mensaje de error."""
@@ -968,15 +914,30 @@ class Handler(BaseHTTPRequestHandler):
             "/api/auth/refresh": self._auth_refresh,
             "/api/auth/logout": self._auth_logout,
             "/api/auth/discord/exchange": self._auth_discord_exchange,
+            "/api/auth/discord/link": self._discord_link,
             "/api/sync": self._sync,
         }
         if post and route in app_routes:
             app_routes[route]()
             return
+        if not post and route == "/api/me":
+            self._me()
+            return
         if self.command == "DELETE" and route == "/api/me/history":
             self._delete_history()
             return
-        self._file_route(route, post)
+        panel_routes = {
+            "/api/info": self._info,
+            "/api/admin/users": self._admin_users,
+            "/api/admin/notifications": self._admin_notifications,
+        }
+        if not post and route in panel_routes:
+            if not self._token_ok():
+                self._error(401, "Clave del panel incorrecta o ausente")
+                return
+            panel_routes[route]()
+            return
+        self._error(404, "Ruta desconocida")
 
     # ------------------------------- peticiones ------------------------------
 

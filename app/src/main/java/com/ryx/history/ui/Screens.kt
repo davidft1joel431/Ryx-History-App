@@ -37,6 +37,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -114,11 +115,14 @@ fun AppRoot(vm: AppViewModel) {
     }
 
     // Cambio de pantalla con un fundido corto en vez de un salto seco.
+    var showProfile by remember { mutableStateOf(false) }
     val stage = when {
         !loggedIn -> "login"
         !listenerOn -> "permiso"
+        showProfile -> "perfil"
         else -> "historial"
     }
+    LaunchedEffect(stage) { if (stage == "historial" || stage == "perfil") vm.loadProfile() }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(Modifier.fillMaxSize()) {
@@ -126,7 +130,8 @@ fun AppRoot(vm: AppViewModel) {
                 when (actual) {
                     "login" -> LoginScreen(vm)
                     "permiso" -> PermissionScreen(onUseAnotherAccount = { vm.logout() })
-                    else -> HistoryScreen(vm)
+                    "perfil" -> ProfileScreen(vm, onBack = { showProfile = false })
+                    else -> HistoryScreen(vm, onOpenProfile = { showProfile = true })
                 }
             }
             SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(12.dp))
@@ -269,7 +274,7 @@ fun PermissionScreen(onUseAnotherAccount: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HistoryScreen(vm: AppViewModel) {
+fun HistoryScreen(vm: AppViewModel, onOpenProfile: () -> Unit) {
     val list by vm.list.collectAsStateWithLifecycle()
     val query by vm.query.collectAsStateWithLifecycle()
     val limit by vm.limit.collectAsStateWithLifecycle()
@@ -292,6 +297,9 @@ fun HistoryScreen(vm: AppViewModel) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = onOpenProfile) {
+                        Icon(Icons.Default.Person, contentDescription = "Perfil")
+                    }
                     IconButton(onClick = { vm.syncNow() }) { Icon(Icons.Default.Refresh, contentDescription = "Sincronizar ahora") }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Más opciones") }

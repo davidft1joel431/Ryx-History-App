@@ -120,6 +120,12 @@ class Api(private val prefs: Prefs) {
 
     fun deleteCloudHistory(): Int = authed("DELETE", "/api/me/history").optInt("deleted")
 
+    /** Datos de la cuenta en el servidor (incluye si tiene Discord vinculado). */
+    fun me(): JSONObject = authed("GET", "/api/me").optJSONObject("user") ?: JSONObject()
+
+    /** Dirección de Discord para vincular la cuenta que entró con correo. */
+    fun discordLinkUrl(): String = authed("POST", "/api/auth/discord/link").optString("url")
+
     /** Envía un lote y devuelve los uuid que el servidor confirmó. */
     fun sync(batch: List<NotificationEntity>): List<String> {
         val arr = JSONArray()
@@ -129,6 +135,7 @@ class Api(private val prefs: Prefs) {
                     .put("uuid", n.uuid).put("packageName", n.packageName).put("appName", n.appName)
                     .putOpt("title", n.title).putOpt("text", n.text).putOpt("subText", n.subText)
                     .putOpt("bigText", n.bigText).putOpt("category", n.category).putOpt("channelId", n.channelId)
+                    .putOpt("image", n.image)
                     .put("postedAt", n.postedAt)
             )
         }
