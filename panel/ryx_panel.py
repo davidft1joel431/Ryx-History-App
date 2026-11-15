@@ -28,6 +28,7 @@ import tkinter.font as tkfont
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from collections import deque
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
@@ -1304,6 +1305,22 @@ class Panel:
         self.history_note.pack(anchor="w", pady=(self.px(2), 0))
         return card
 
+    def open_host(self) -> None:
+        """Abre la direccion del servidor activo en el navegador del sistema."""
+        server = active_server(self.cfg)
+        if not server:
+            self.log("No hay servidor configurado.")
+            return
+        url = (server.get("url") or "").rstrip("/")
+        if not url:
+            self.log("El servidor activo no tiene direccion.")
+            return
+        try:
+            webbrowser.open(url)
+            self.log(f"Abriendo {url} en el navegador")
+        except Exception as error:
+            self.log(f"No se pudo abrir el navegador: {error}")
+
     def history_path(self) -> Path:
         return self.repo / "panel" / "history.json"
 
@@ -1382,7 +1399,7 @@ class Panel:
         cabecera.pack(fill="x")
         punto = self.label(cabecera, "●  esperando datos", size=9, color=MUTED)
         punto.pack(side="left")
-        self.label(cabecera, "se actualiza cada 5 s", size=9, color=MUTED).pack(side="right")
+        self.button(cabecera, "Abrir host", self.open_host, size=8, padx=10, pady=4).pack(side="right")
 
         rejilla = tk.Frame(parent, bg=CARD)
         rejilla.pack(fill="x", pady=(self.px(8), 0))
@@ -1396,6 +1413,10 @@ class Panel:
             self.label(celda, titulo, size=8, color=MUTED).pack(anchor="w")
             valores[clave] = self.label(celda, "—", size=11, color=CREAM, bold=True)
             valores[clave].pack(anchor="w")
+        # La nota va al pie para no apretar la cabecera con el boton.
+        self.label(parent, "se actualiza cada 5 s", size=8, color=MUTED).pack(
+            anchor="e", pady=(self.px(2), 0)
+        )
         return punto, valores
 
     def paint_status(self, data: dict) -> None:
