@@ -27,8 +27,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.security.SecureRandom
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private const val PAGE = 200
+private const val EXPORT_LIMIT = 5000
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -70,6 +74,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Mensajes desde una fecha (para el filtro por rango del perfil). */
     fun since(from: Long): StateFlow<List<NotificationEntity>> =
         dao.since(from, PAGE).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Guarda en el archivo elegido (texto o CSV) los mensajes del rango y la app
+     * seleccionados en el perfil. No usa `busy` de la red para no bloquear el sync.
+     */
+    fun export(from: Long, pkg: String?, csv: Boolean, uri: Uri) {
+        viewModelScope.launch {
+            busy.value = true
+            try {
+                val rows = withContext(Dispatchers.IO) { dao.export(from, pkg ?: "", EXPORT_LIMIT) }
+                if (rows.isEmpty()) {
+                    message.value = "No hay mensajes que exportar en ese rango"
+                    return@launch
+                }
+                val texto = withContext(Dispatchers.Default) {
+                    if (csv) exportCsv(rows) else exportText(rows)
+                }
+                withContext(Dispatchers.IO) {
+                    val salida = getApplication<Application>().contentResolver.openOutputStream(uri)
+                        ?: throw IOException("el archivo no se pudo abrir")
+                    salida.use { it.write(texto.toByteArray(Charsets.UTF_8)) }
+                }
+                message.value = "Exportados ${rows.size} mensaje(s)"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                message.value = "No se pudo escribir el archivo"
+            } finally {
+                busy.value = false
+            }
+        }
+    }
 
     private fun runNetwork(after: (() -> Unit)? = null, block: suspend () -> Unit) {
         viewModelScope.launch {
@@ -169,8 +205,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun handleDeepLink(uri: Uri) {
-        // Vuelta del navegador tras vincular Discord a una cuenta con correo.
+    fun handleDeepLink(uri: Uri) {        // Vuelta del navegador tras vincular Discord a una cuenta con correo.
         if (uri.getQueryParameter("linked") == "1") {
             message.value = "Cuenta de Discord vinculada"
             loadProfile()
@@ -253,4 +288,50 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             dao.clear()
         }
     }
+}
+
+private fun fecha(patron: String) = SimpleDateFormat(patron, Locale("es", "PE"))
+
+private fun cuerpoDe(n: NotificationEntity): String =
+    n.bigText?.takeIf { it.isNotBlank() } ?: n.text ?: ""
+
+/** Archivo de texto legible con el texto completo de cada mensaje. */
+private fun exportText(rows: List<NotificationEntity>): String {
+    val salida = StringBuilder()
+    salida.append("RyxHistory · mensajes exportados\r\n")
+    salida.append("Generado: ").append(fecha("dd/MM/yyyy HH:mm").format(Date())).append("\r\n")
+    salida.append("Mensajes: ").append(rows.size).append("\r\n\r\n")
+    rows.forEach { n ->
+        salida.append('[').append(fecha("dd/MM/yyyy HH:mm").format(Date(n.postedAt))).append("] ")
+            .append(n.appName).append(" (").append(n.packageName).append(")\r\n")
+        if (!n.title.isNullOrBlank()) salida.append("Título: ").append(n.title).append("\r\n")
+        salida.append(cuerpoDe(n)).append("\r\n")
+        if (!n.category.isNullOrBlank()) salida.append("Categoría: ").append(n.category).append("\r\n")
+        if (!n.image.isNullOrBlank()) salida.append("[imagen adjunta]\r\n")
+        salida.append("---\r\n")
+    }
+    return salida.toString()
+}
+
+private fun csvCampo(valor: String?): String = "\"" + (valor ?: "").replace("\"", "\"\"") + "\""
+
+/** Hoja de cálculo: una fila por mensaje, con BOM para que Excel lea los acentos. */
+private fun exportCsv(rows: List<NotificationEntity>): String {
+    val salida = StringBuilder("\uFEFF")
+    salida.append("fecha,hora,app,paquete,titulo,texto,texto_completo,categoria,imagen\r\n")
+    rows.forEach { n ->
+        val campos = listOf(
+            fecha("yyyy-MM-dd").format(Date(n.postedAt)),
+            fecha("HH:mm").format(Date(n.postedAt)),
+            n.appName,
+            n.packageName,
+            n.title,
+            n.text,
+            n.bigText,
+            n.category,
+            if (n.image.isNullOrBlank()) "no" else "si"
+        )
+        salida.append(campos.joinToString(",") { csvCampo(it) }).append("\r\n")
+    }
+    return salida.toString()
 }

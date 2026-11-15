@@ -88,6 +88,14 @@ interface NotificationDao {
 
     @Query("SELECT COUNT(*) FROM notifications WHERE synced = 1")
     fun sentCount(): Flow<Int>
+
+    /** Filas de un rango para exportar (la pantalla no limita la exportación). */
+    @Query(
+        """SELECT * FROM notifications
+           WHERE postedAt >= :from AND (:pkg = '' OR packageName = :pkg)
+           ORDER BY postedAt DESC LIMIT :limit"""
+    )
+    suspend fun export(from: Long, pkg: String, limit: Int): List<NotificationEntity>
 }
 
 val MIGRATION_1_2 = object : Migration(1, 2) {

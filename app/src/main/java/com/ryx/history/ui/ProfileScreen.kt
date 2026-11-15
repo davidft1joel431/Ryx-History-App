@@ -2,6 +2,8 @@ package com.ryx.history.ui
 
 import android.graphics.BitmapFactory
 import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -25,6 +27,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -35,6 +39,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -83,6 +88,13 @@ fun ProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
         }
     }
     val mensajes by flujo.collectAsStateWithLifecycle()
+    var exportar by remember { mutableStateOf(false) }
+    val csvLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri -> if (uri != null) vm.export(desde, appFilter, true, uri) }
+    val txtLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri -> if (uri != null) vm.export(desde, appFilter, false, uri) }
 
     LaunchedEffect(Unit) { vm.loadProfile() }
 
@@ -96,6 +108,11 @@ fun ProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.Close, contentDescription = "Volver")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { exportar = true }) {
+                        Icon(Icons.Default.Share, contentDescription = "Exportar mensajes")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -161,7 +178,47 @@ fun ProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
             }
         }
     }
+
+    if (exportar) {
+        ExportDialog(
+            filtroApp = appFilter,
+            onCerrar = { exportar = false },
+            onCsv = {
+                exportar = false
+                csvLauncher.launch(nombreExport("csv"))
+            },
+            onTexto = {
+                exportar = false
+                txtLauncher.launch(nombreExport("txt"))
+            }
+        )
+    }
 }
+
+@Composable
+private fun ExportDialog(
+    filtroApp: String?,
+    onCerrar: () -> Unit,
+    onCsv: () -> Unit,
+    onTexto: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onCerrar,
+        title = { Text("Exportar mensajes") },
+        text = {
+            Text(
+                "Se guardan los mensajes del rango y el filtro actuales" +
+                    (if (filtroApp != null) " ($filtroApp)" else "") +
+                    ", con el texto completo. Elige el formato."
+            )
+        },
+        confirmButton = { TextButton(onClick = onCsv) { Text("Hoja de cálculo (.csv)") } },
+        dismissButton = { TextButton(onClick = onTexto) { Text("Archivo de texto (.txt)") } }
+    )
+}
+
+private fun nombreExport(extension: String): String =
+    "ryxhistory-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date()) + "." + extension
 
 @Composable
 private fun AccountCard(
