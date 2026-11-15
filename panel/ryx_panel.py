@@ -11,8 +11,8 @@ Modos: sin argumentos abre la ventana; --console es el menu de texto;
 """
 from __future__ import annotations
 
-import ctypes
 import base64
+import ctypes
 import json
 import os
 import queue
@@ -28,6 +28,7 @@ import tkinter.font as tkfont
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
@@ -611,6 +612,8 @@ class Panel:
         self.live_dot = None
         self.live_home: dict = {}
         self.live_home_dot = None
+        self.history: deque = deque(maxlen=120)
+        self.history_boxes: dict = {}
         self.current_page = "inicio"
         self.status_busy = False
         self._state_color = MUTED
@@ -899,8 +902,9 @@ class Panel:
         # Estado del host y consola comparten fila: se gana alto para la lista.
         bajo = tk.Frame(page, bg=BG)
         bajo.grid(row=5, column=0, sticky="ew", pady=(self.px(10), 0))
-        bajo.columnconfigure(0, weight=0, minsize=self.px(300))
-        bajo.columnconfigure(1, weight=1)
+        bajo.columnconfigure(0, weight=0, minsize=self.px(250))
+        bajo.columnconfigure(1, weight=0, minsize=self.px(230))
+        bajo.columnconfigure(2, weight=1)
 
         vivo_card, vivo = self.card(bajo, "Estado del host")
         vivo_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.px(6)))
@@ -913,8 +917,11 @@ class Panel:
             columnas=2,
         )
 
+        hist_card = self._build_history(bajo)
+        hist_card.grid(row=0, column=1, sticky="nsew", padx=self.px(6))
+
         consola_card, consola = self.card(bajo, "Consola")
-        consola_card.grid(row=0, column=1, sticky="nsew", padx=(self.px(6), 0))
+        consola_card.grid(row=0, column=2, sticky="nsew", padx=(self.px(6), 0))
         caja = RoundedBox(self, consola, fill=LOG_BG, outline=LINE, radius=10, padding=6)
         caja.pack(fill="both", expand=True)
         self.console = tk.Text(
@@ -1268,6 +1275,56 @@ class Panel:
             columnas=4,
         )
 
+    def _build_history(self, parent):
+        """Tarjeta con dos mini-graficas de lo que devuelve /api/status."""
+        card, body = self.card(parent, "Historico")
+        self.history_boxes = {}
+        for clave, titulo, color in (("users", "Cuentas", GOLD),
+                                     ("notifications", "Notificaciones", ORANGE)):
+            fila = tk.Frame(body, bg=CARD)
+            fila.pack(fill="x")
+            self.label(fila, titulo, size=9, color=MUTED).pack(side="left")
+            valor = self.label(fila, "—", size=9, color=color, bold=True)
+            valor.pack(side="right")
+            # width pequeno: el lienzo se estira con el `fill`, no pide ancho fijo.
+            lienzo = tk.Canvas(body, bg=CARD, highlightthickness=0, bd=0,
+                               width=self.px(40), height=self.px(26))
+            lienzo.pack(fill="x", pady=(0, self.px(4)))
+            self.history_boxes[clave] = (lienzo, valor, color)
+            lienzo.bind("<Configure>", lambda _e: self.draw_history())
+        return card
+
+    def draw_history(self) -> None:
+        """Dibuja cada serie con su propia escala; la ultima cifra va a la derecha."""
+        if not self.history_boxes:
+            return
+        for clave, (lienzo, valor, color) in self.history_boxes.items():
+            lienzo.delete("all")
+            serie = [int(punto.get(clave, 0)) for punto in self.history]
+            if serie:
+                valor.config(text=str(serie[-1]))
+            ancho = max(lienzo.winfo_width(), self.px(40))
+            alto = max(lienzo.winfo_height(), self.px(18))
+            if len(serie) < 2:
+                lienzo.create_text(
+                    self.px(2), alto / 2, anchor="w", text="esperando lecturas...",
+                    fill=MUTED, font=self.fnt(8),
+                )
+                continue
+            maximo = max(max(serie), 1)
+            paso = ancho / (len(serie) - 1)
+            puntos = []
+            for indice, dato in enumerate(serie):
+                x = indice * paso
+                y = alto - self.px(3) - (dato / maximo) * (alto - self.px(8))
+                puntos.extend((x, y))
+            lienzo.create_line(*puntos, fill=color, width=max(1, int(self.px(1))), smooth=False)
+            lienzo.create_oval(
+                puntos[-2] - self.px(2), puntos[-1] - self.px(2),
+                puntos[-2] + self.px(2), puntos[-1] + self.px(2),
+                fill=color, outline=color,
+            )
+
     def _live_grid(self, parent, celdas, columnas: int = 4):
         """Punto de estado y rejilla de valores; devuelve (punto, etiquetas)."""
         cabecera = tk.Frame(parent, bg=CARD)
@@ -1304,6 +1361,11 @@ class Panel:
             "size": human_size(data.get("size", 0)),
             "updated": time.strftime("%H:%M:%S"),
         }
+        self.history.append({
+            "users": int(data.get("users", 0)),
+            "notifications": int(data.get("notifications", 0)),
+        })
+        self.draw_history()
         nodo = data.get("node") or "host"
         for destinos, punto in ((self.live, self.live_dot), (self.live_home, self.live_home_dot)):
             if not destinos:
