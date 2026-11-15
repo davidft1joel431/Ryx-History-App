@@ -35,6 +35,9 @@ from tkinter import filedialog, messagebox, simpledialog
 APP = "RyxHistory"
 DEFAULT_SERVER = "https://CAMBIA-ESTO.example.com"
 TIMEOUT = 8
+HISTORY_KEEP = 120        # lecturas que se dibujan (una cada 5 s)
+HISTORY_MAX_AGE = 3600    # al abrir, se descarta lo que tenga mas de una hora
+HISTORY_SAVE_EVERY = 30   # segundos entre escrituras del historico
 
 BG = "#14100C"
 CARD = "#1E1812"
@@ -595,6 +598,7 @@ class Panel:
         enable_dpi_awareness()
         self.repo = repo
         self.cfg = load_config(repo)
+
         self.selftest = selftest
         self.status: dict[str, tuple[bool, str]] = {}
         self.messages: queue.Queue[str] = queue.Queue()
@@ -613,8 +617,11 @@ class Panel:
         self.live_home: dict = {}
         self.live_home_dot = None
         self.host_online = None
-        self.history: deque = deque(maxlen=120)
+        self.history: deque = deque(maxlen=HISTORY_KEEP)
         self.history_boxes: dict = {}
+        self.history_note = None
+        self.history_saved_at = 0.0
+        self.load_history()
         self.current_page = "inicio"
         self.status_busy = False
         self._state_color = MUTED
@@ -1293,7 +1300,43 @@ class Panel:
             lienzo.pack(fill="x", pady=(0, self.px(4)))
             self.history_boxes[clave] = (lienzo, valor, color)
             lienzo.bind("<Configure>", lambda _e: self.draw_history())
+        self.history_note = self.label(body, "esperando lecturas...", size=8, color=MUTED)
+        self.history_note.pack(anchor="w", pady=(self.px(2), 0))
         return card
+
+    def history_path(self) -> Path:
+        return self.repo / "panel" / "history.json"
+
+    def load_history(self) -> None:
+        """Recupera las ultimas lecturas guardadas para que la linea no empiece de cero."""
+        path = self.history_path()
+        try:
+            crudo = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        limite = time.time() - HISTORY_MAX_AGE
+        for item in crudo if isinstance(crudo, list) else []:
+            try:
+                ts, users, notas = int(item[0]), int(item[1]), int(item[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if ts >= limite:
+                self.history.append({"ts": ts, "users": users, "notifications": notas})
+
+    def save_history(self) -> None:
+        self.history_saved_at = time.time()
+        path = self.history_path()
+        datos = [
+            [punto.get("ts", 0), punto.get("users", 0), punto.get("notifications", 0)]
+            for punto in self.history
+        ]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporal = path.with_suffix(".tmp")
+            temporal.write_text(json.dumps(datos), encoding="utf-8")
+            os.replace(temporal, path)
+        except OSError:
+            pass
 
     def draw_history(self) -> None:
         """Dibuja cada serie con su propia escala; la ultima cifra va a la derecha."""
@@ -1313,10 +1356,14 @@ class Panel:
                 )
                 continue
             maximo = max(max(serie), 1)
-            paso = ancho / (len(serie) - 1)
+            inicio = self.history[0].get("ts", 0)
+            final = self.history[-1].get("ts", 0)
+            tramo = max(final - inicio, 1)
             puntos = []
             for indice, dato in enumerate(serie):
-                x = indice * paso
+                # La x va por tiempo: si hubo un cierre, el hueco se ve como hueco.
+                cuando = self.history[indice].get("ts", inicio + indice)
+                x = min(max((cuando - inicio) / tramo, 0.0), 1.0) * ancho
                 y = alto - self.px(3) - (dato / maximo) * (alto - self.px(8))
                 puntos.extend((x, y))
             lienzo.create_line(*puntos, fill=color, width=max(1, int(self.px(1))), smooth=False)
@@ -1325,6 +1372,9 @@ class Panel:
                 puntos[-2] + self.px(2), puntos[-1] + self.px(2),
                 fill=color, outline=color,
             )
+        if self.history_note is not None and len(self.history) >= 2:
+            minutos = max(1, int((self.history[-1].get("ts", 0) - self.history[0].get("ts", 0)) / 60))
+            self.history_note.config(text=f"{len(self.history)} lecturas · ultimos {minutos} min")
 
     def _live_grid(self, parent, celdas, columnas: int = 4):
         """Punto de estado y rejilla de valores; devuelve (punto, etiquetas)."""
@@ -1363,10 +1413,13 @@ class Panel:
             "updated": time.strftime("%H:%M:%S"),
         }
         self.history.append({
+            "ts": int(time.time()),
             "users": int(data.get("users", 0)),
             "notifications": int(data.get("notifications", 0)),
         })
         self.draw_history()
+        if time.time() - self.history_saved_at >= HISTORY_SAVE_EVERY:
+            self.save_history()
         nodo = data.get("node") or "host"
         for destinos, punto in ((self.live, self.live_dot), (self.live_home, self.live_home_dot)):
             if not destinos:

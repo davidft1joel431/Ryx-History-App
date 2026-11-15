@@ -18,3 +18,4 @@ __pycache__/
 # Clave del agente de los servidores
 server/ryx_token.txt
 server/*.zip
+panel/history.json
