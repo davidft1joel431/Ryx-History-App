@@ -68,6 +68,7 @@ el login de Discord usan ese mismo servidor. La app no permite cambiarla despué
 | Método | Ruta | Uso |
 | --- | --- | --- |
 | GET | `/api/ping` | Comprobar que responde (sin clave) |
+| GET | `/api/status` | Estado público: nodo, versión, cuentas, notificaciones y Discord (sin clave, sin rutas) |
 | GET | `/auth/discord/start?app_state=` | Abre Discord y vuelve al callback |
 | GET | `/auth/discord/callback` | Discord vuelve aquí y redirige a `ryxhistory://` |
 | POST | `/api/auth/register` | `{email, password, name}` → sesión |
@@ -84,7 +85,9 @@ el login de Discord usan ese mismo servidor. La app no permite cambiarla despué
 | GET | `/api/admin/notifications?user=&q=&limit=` | Historial de una cuenta (clave del panel) |
 
 Las rutas de la app usan `Authorization: Bearer <accessToken>`; las del panel,
-la cabecera `X-Ryx-Token`.
+la cabecera `X-Ryx-Token`. `/api/status` es público (solo números y nombres): es
+lo que consulta el botón **Probar servidor** del panel para mostrar las cuentas y
+notificaciones sin pedir la clave.
 
 ## Seguridad
 

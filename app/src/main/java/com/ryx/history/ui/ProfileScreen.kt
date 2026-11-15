@@ -56,6 +56,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ryx.history.data.AppCount
 import com.ryx.history.data.NotificationEntity
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -72,8 +73,16 @@ fun ProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
     val contexto = LocalContext.current
     var section by remember { mutableStateOf("mensajes") }
     var appFilter by remember { mutableStateOf<String?>(null) }
-    val appFlow = remember(appFilter) { appFilter?.let { vm.byApp(it) } }
-    val mensajes by (appFlow ?: vm.list).collectAsStateWithLifecycle()
+    var rango by remember { mutableStateOf(0) }
+    val desde = remember(rango) { rangeStart(rango) }
+    val flujo = remember(appFilter, desde) {
+        when {
+            appFilter != null -> vm.byApp(appFilter!!, desde)
+            desde > 0L -> vm.since(desde)
+            else -> vm.list
+        }
+    }
+    val mensajes by flujo.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) { vm.loadProfile() }
 
@@ -115,6 +124,7 @@ fun ProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
                     appFilter = null
                 }
             }
+            item { RangeRow(actual = rango) { rango = it } }
             if (section == "apps") {
                 items(apps, key = { it.packageName }) { app ->
                     AppRow(app) {
@@ -245,6 +255,48 @@ private fun SectionTab(texto: String, activo: Boolean, modifier: Modifier = Modi
             )
         }
     }
+}
+
+@Composable
+private fun RangeRow(actual: Int, onPick: (Int) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf(0 to "Todo", 1 to "Hoy", 7 to "7 días", 30 to "30 días").forEach { (valor, texto) ->
+            val activo = actual == valor
+            Box(
+                Modifier.weight(1f)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(
+                        if (activo) MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f)
+                        else MaterialTheme.colorScheme.surface
+                    )
+                    .clickable { onPick(valor) }
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    texto,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (activo) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/** Desde cuándo se listan los mensajes: 0 = todo, 1 = hoy, 7 y 30 = últimos días. */
+private fun rangeStart(dias: Int): Long {
+    if (dias <= 0) return 0L
+    if (dias == 1) {
+        val cal = Calendar.getInstance()
+        cal.set(Calendar.HOUR_OF_DAY, 0)
+        cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
+    }
+    return System.currentTimeMillis() - dias * 86_400_000L
 }
 
 @Composable

@@ -71,6 +71,15 @@ interface NotificationDao {
     @Query("SELECT * FROM notifications WHERE packageName = :pkg ORDER BY postedAt DESC LIMIT :limit")
     fun byApp(pkg: String, limit: Int): Flow<List<NotificationEntity>>
 
+    @Query("SELECT * FROM notifications WHERE postedAt >= :from ORDER BY postedAt DESC LIMIT :limit")
+    fun since(from: Long, limit: Int): Flow<List<NotificationEntity>>
+
+    @Query(
+        """SELECT * FROM notifications WHERE packageName = :pkg AND postedAt >= :from
+           ORDER BY postedAt DESC LIMIT :limit"""
+    )
+    fun byAppSince(pkg: String, from: Long, limit: Int): Flow<List<NotificationEntity>>
+
     @Query(
         """SELECT packageName, appName, COUNT(*) AS total FROM notifications
            GROUP BY packageName, appName ORDER BY total DESC"""

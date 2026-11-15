@@ -239,6 +239,19 @@ def _request(url: str) -> tuple[bool, str, int]:
         return False, text, 0
 
 
+def status_of(base: str) -> dict:
+    """Lee /api/status (publico) para saber cuentas y notificaciones sin clave."""
+    try:
+        request = urllib.request.Request(
+            base.rstrip("/") + "/api/status", headers={"User-Agent": f"{APP}/panel"}
+        )
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def probe(server: str, log=print) -> tuple[bool, str]:
     """Comprueba el servidor; si no responde por https prueba por http y viceversa."""
     candidates = [server]
@@ -252,7 +265,17 @@ def probe(server: str, log=print) -> tuple[bool, str]:
             ok, detail, ms = _request(base + path)
             if ok:
                 extra = "" if base == server else f" (responde por {base.split('://')[0]})"
-                message = f"{detail} · {ms} ms{extra}"
+                estado = status_of(base)
+                resumen = ""
+                if estado:
+                    resumen = (
+                        f" · {estado.get('node') or 'RyxHistory'} {estado.get('version', '')}"
+                        f" · {estado.get('users', 0)} cuentas"
+                        f" · {estado.get('notifications', 0)} notificaciones"
+                    )
+                    if not estado.get("discord"):
+                        resumen += " · Discord sin configurar"
+                message = f"{detail} · {ms} ms{extra}{resumen}"
                 log(f"OK   {base + path} -> {message}")
                 return True, message
             log(f"--   {base + path} -> {detail}")

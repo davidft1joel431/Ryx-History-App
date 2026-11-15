@@ -63,8 +63,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val profile = MutableStateFlow<AccountProfile?>(null)
 
-    fun byApp(pkg: String): StateFlow<List<NotificationEntity>> =
-        dao.byApp(pkg, PAGE).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    fun byApp(pkg: String, from: Long = 0L): StateFlow<List<NotificationEntity>> =
+        (if (from <= 0L) dao.byApp(pkg, PAGE) else dao.byAppSince(pkg, from, PAGE))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Mensajes desde una fecha (para el filtro por rango del perfil). */
+    fun since(from: Long): StateFlow<List<NotificationEntity>> =
+        dao.since(from, PAGE).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private fun runNetwork(after: (() -> Unit)? = null, block: suspend () -> Unit) {
         viewModelScope.launch {

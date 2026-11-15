@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP = "RyxHistory"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 STARTED = time.time()
 DB_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db3", ".realm", ".mdb", ".accdb", ".sql", ".dump")
 MAX_BATCH = 500
@@ -848,6 +848,22 @@ class Handler(BaseHTTPRequestHandler):
     def _ping(self):
         self._json({"ok": True, "app": APP, "node": self.node, "version": VERSION})
 
+    def _status(self):
+        """Estado publico del servidor: solo numeros, sin rutas ni cuentas."""
+        database = self.store.public_stats() if self.store else {}
+        self._json({
+            "ok": True,
+            "app": APP,
+            "node": self.node,
+            "version": VERSION,
+            "uptime": int(time.time() - STARTED),
+            "system": f"{platform.system()} {platform.release()}",
+            "users": database.get("users", 0),
+            "notifications": database.get("notifications", 0),
+            "size": database.get("size", 0),
+            "discord": bool(self.discord_id and self.discord_secret),
+        })
+
     def _info(self):
         total, free = _disk()
         # Sin rutas ni carpetas: el panel solo necesita numeros.
@@ -898,6 +914,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route in ("/api/ping", "/ping", "/"):
             self._ping()
+            return
+        if route in ("/api/status", "/status") and not post:
+            self._status()
             return
         if route == "/auth/discord/start" and not post:
             self._discord_start()
