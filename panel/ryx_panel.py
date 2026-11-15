@@ -608,6 +608,9 @@ class Panel:
         self.registry_view: list = []
         self.registry_index = 0
         self.live: dict = {}
+        self.live_dot = None
+        self.live_home: dict = {}
+        self.live_home_dot = None
         self.current_page = "inicio"
         self.status_busy = False
         self._state_color = MUTED
@@ -848,7 +851,7 @@ class Panel:
     def _build_home(self):
         page = self.pages["inicio"]
         page.columnconfigure(0, weight=1)
-        page.rowconfigure(4, weight=1)
+        page.rowconfigure(4, weight=1, minsize=self.px(120))
 
         top = tk.Frame(page, bg=BG)
         top.grid(row=0, column=0, sticky="ew")
@@ -893,8 +896,25 @@ class Panel:
         self.home_grid.columnconfigure(1, weight=1, uniform="srv")
         self.root.bind_all("<MouseWheel>", self._home_wheel, add="+")
 
-        consola_card, consola = self.card(page, "Consola")
-        consola_card.grid(row=5, column=0, sticky="ew", pady=(self.px(10), 0))
+        # Estado del host y consola comparten fila: se gana alto para la lista.
+        bajo = tk.Frame(page, bg=BG)
+        bajo.grid(row=5, column=0, sticky="ew", pady=(self.px(10), 0))
+        bajo.columnconfigure(0, weight=0, minsize=self.px(300))
+        bajo.columnconfigure(1, weight=1)
+
+        vivo_card, vivo = self.card(bajo, "Estado del host")
+        vivo_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.px(6)))
+        self.live_home_dot, self.live_home = self._live_grid(
+            vivo,
+            (
+                ("uptime", "ENCENDIDO"), ("users", "CUENTAS"),
+                ("notifications", "NOTIFICACIONES"), ("discord", "DISCORD"),
+            ),
+            columnas=2,
+        )
+
+        consola_card, consola = self.card(bajo, "Consola")
+        consola_card.grid(row=0, column=1, sticky="nsew", padx=(self.px(6), 0))
         caja = RoundedBox(self, consola, fill=LOG_BG, outline=LINE, radius=10, padding=6)
         caja.pack(fill="both", expand=True)
         self.console = tk.Text(
@@ -1238,29 +1258,37 @@ class Panel:
 
         vivo_card, vivo = self.card(body, "Estado en vivo")
         vivo_card.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(self.px(10), 0))
-        cabecera = tk.Frame(vivo, bg=CARD)
+        self.live_dot, self.live = self._live_grid(
+            vivo,
+            (
+                ("uptime", "ENCENDIDO"), ("version", "VERSION"), ("system", "SISTEMA"),
+                ("discord", "DISCORD"), ("users", "CUENTAS"), ("notifications", "NOTIFICACIONES"),
+                ("size", "BASE DE DATOS"), ("updated", "LEIDO A LAS"),
+            ),
+            columnas=4,
+        )
+
+    def _live_grid(self, parent, celdas, columnas: int = 4):
+        """Punto de estado y rejilla de valores; devuelve (punto, etiquetas)."""
+        cabecera = tk.Frame(parent, bg=CARD)
         cabecera.pack(fill="x")
-        self.live_dot = self.label(cabecera, "●  esperando datos", size=9, color=MUTED)
-        self.live_dot.pack(side="left")
+        punto = self.label(cabecera, "●  esperando datos", size=9, color=MUTED)
+        punto.pack(side="left")
         self.label(cabecera, "se actualiza cada 5 s", size=9, color=MUTED).pack(side="right")
 
-        rejilla = tk.Frame(vivo, bg=CARD)
-        rejilla.pack(fill="x", pady=(self.px(10), 0))
-        for columna in range(4):
-            rejilla.columnconfigure(columna, weight=1, uniform="vivo")
-        self.live = {}
-        celdas = (
-            ("uptime", "ENCENDIDO"), ("version", "VERSION"), ("system", "SISTEMA"),
-            ("discord", "DISCORD"), ("users", "CUENTAS"), ("notifications", "NOTIFICACIONES"),
-            ("size", "BASE DE DATOS"), ("updated", "LEIDO A LAS"),
-        )
+        rejilla = tk.Frame(parent, bg=CARD)
+        rejilla.pack(fill="x", pady=(self.px(8), 0))
+        for columna in range(columnas):
+            rejilla.columnconfigure(columna, weight=1, uniform=f"vivo{id(rejilla)}")
+        valores = {}
         for indice, (clave, titulo) in enumerate(celdas):
-            fila, columna = divmod(indice, 4)
+            fila, columna = divmod(indice, columnas)
             celda = tk.Frame(rejilla, bg=CARD)
             celda.grid(row=fila, column=columna, sticky="w", pady=(0, self.px(6)))
             self.label(celda, titulo, size=8, color=MUTED).pack(anchor="w")
-            self.live[clave] = self.label(celda, "—", size=11, color=CREAM, bold=True)
-            self.live[clave].pack(anchor="w")
+            valores[clave] = self.label(celda, "—", size=11, color=CREAM, bold=True)
+            valores[clave].pack(anchor="w")
+        return punto, valores
 
     def paint_status(self, data: dict) -> None:
         """Vuelca lo que devuelve /api/status en la tarjeta de estado."""
@@ -1276,12 +1304,18 @@ class Panel:
             "size": human_size(data.get("size", 0)),
             "updated": time.strftime("%H:%M:%S"),
         }
-        for clave, texto in valores.items():
-            etiqueta = self.live.get(clave)
-            if etiqueta is not None:
-                etiqueta.config(text=texto)
-        self.live["discord"].config(fg=GREEN if data.get("discord") else MUTED)
-        self.live_dot.config(text=f"●  en vivo · {data.get('node') or 'host'}", fg=GREEN)
+        nodo = data.get("node") or "host"
+        for destinos, punto in ((self.live, self.live_dot), (self.live_home, self.live_home_dot)):
+            if not destinos:
+                continue
+            for clave, texto in valores.items():
+                etiqueta = destinos.get(clave)
+                if etiqueta is not None:
+                    etiqueta.config(text=texto)
+            if "discord" in destinos:
+                destinos["discord"].config(fg=GREEN if data.get("discord") else MUTED)
+            if punto is not None:
+                punto.config(text=f"●  en vivo · {nodo}", fg=GREEN)
 
     def refresh_status(self) -> None:
         """Pregunta /api/status sin bloquear la ventana."""
@@ -1301,8 +1335,11 @@ class Panel:
                 if data:
                     self.paint_status(data)
                 else:
-                    self.live_dot.config(text="●  sin respuesta del host", fg=RED)
-                    self.live["updated"].config(text="—")
+                    for destinos, punto in ((self.live, self.live_dot), (self.live_home, self.live_home_dot)):
+                        if punto is not None:
+                            punto.config(text="●  sin respuesta del host", fg=RED)
+                        if destinos.get("updated") is not None:
+                            destinos["updated"].config(text="—")
 
             self.ui(done)
 
@@ -1313,7 +1350,7 @@ class Panel:
 
     def _status_tick(self) -> None:
         try:
-            if self.current_page == "servidor":
+            if self.current_page in ("servidor", "inicio"):
                 self.refresh_status()
         except Exception:
             pass
