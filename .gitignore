@@ -14,3 +14,6 @@ panel/build/
 panel/dist/
 panel/out/
 __pycache__/
+
+# Clave del agente de los servidores
+server/ryx_token.txt
