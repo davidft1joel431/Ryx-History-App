@@ -76,6 +76,8 @@ la app: Ajustes → servidor.
 | POST | `/api/sync` | `{device, notifications[]}` → `{accepted:[uuid]}` |
 | DELETE | `/api/me/history` | Borra el historial de la cuenta |
 | GET | `/api/info` | Nodo, disco, base de datos, Discord (clave del panel) |
+| GET | `/api/admin/users` | Cuentas con sus contadores (clave del panel) |
+| GET | `/api/admin/notifications?user=&q=&limit=` | Historial de una cuenta (clave del panel) |
 | GET | `/api/list?path=` | Listar una carpeta (clave del panel) |
 | GET | `/api/download?path=` | Descargar un archivo (clave del panel) |
 | POST | `/api/upload?path=` | Subir un archivo (clave del panel) |
@@ -86,8 +88,24 @@ la app: Ajustes → servidor.
 Las rutas de sesión usan `Authorization: Bearer <accessToken>`; las de archivos,
 la cabecera `X-Ryx-Token`.
 
+## Seguridad
+
+- La API de la app nunca devuelve rutas del disco: `/api/info` solo da nombres y
+  tamaños, y `/api/list` trabaja con rutas relativas a `--root`.
+- La clave del panel viaja solo en la cabecera `X-Ryx-Token` (nunca en la URL) y
+  se compara en tiempo constante.
+- Límites por IP: 300 peticiones por minuto en general, 8 intentos de entrada por
+  cada 5 minutos y 5 registros por cada 15 minutos; al pasarse, la IP queda
+  bloqueada un rato y la respuesta es 429.
+- Contraseñas con PBKDF2-SHA256 (120 000 vueltas y sal por cuenta); las sesiones
+  se guardan como hash y caducan (30 días el acceso, 180 el refresco).
+- Los mensajes de error no incluyen trazas ni rutas, y las páginas HTML se sirven
+  con CSP, `X-Frame-Options: DENY` y `nosniff`.
+- El acceso a archivos no sale nunca de `--root` (se resuelven los enlaces y se
+  comprueba la ruta real).
+
 ## Copia de la base de datos
 
 La base de datos es un archivo: cópiala con el servidor parado, o desde el panel
-(página **Servidor** → carpeta `ryx.db` → **Descargar**). Las copias `-wal` y
-`-shm` solo hacen falta si el servidor está en marcha.
+(página **Servidor** → **Copia de la base**). Las copias `-wal` y `-shm` solo
+hacen falta si el servidor está en marcha.

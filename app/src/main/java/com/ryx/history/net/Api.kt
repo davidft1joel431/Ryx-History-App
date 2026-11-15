@@ -24,9 +24,12 @@ class Api(private val prefs: Prefs) {
         .build()
     private val defaultBase = BuildConfig.SERVER_URL.trimEnd('/')
 
-    /** Dirección efectiva del servidor: la que fijó el usuario o la de fábrica. */
+    /**
+     * Dirección del servidor: la que trae el APK (BuildConfig.SERVER_URL).
+     * No se puede cambiar desde la app; se cambia publicando una versión nueva.
+     */
     val base: String
-        get() = prefs.serverUrl?.takeIf { it.isNotBlank() }?.trimEnd('/') ?: defaultBase
+        get() = defaultBase
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
     /** false si el APK se compiló sin el secret SERVER_URL y sigue apuntando a la URL de ejemplo. */

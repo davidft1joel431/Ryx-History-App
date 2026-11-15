@@ -42,9 +42,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val busy = MutableStateFlow(false)
     val message = MutableStateFlow<String?>(null)
 
-    /** Dirección efectiva del servidor; cambia al editarla en Ajustes. */
-    val serverBase = MutableStateFlow(ryx.api.base)
-
     val list: StateFlow<List<NotificationEntity>> =
         combine(query, limit) { q, l -> q.trim() to l }
             .flatMapLatest { (q, l) -> dao.observe(q, l) }
@@ -161,35 +158,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         names.firstNotNullOfOrNull { name ->
             uri.getQueryParameter(name)?.takeIf { it.isNotBlank() }
         }
-
-    fun setServer(raw: String) {
-        val url = normalizeServerUrl(raw)
-        if (url == null) {
-            message.value = "Dirección no válida. Ejemplo: https://192.168.1.10:3000"
-            return
-        }
-        ryx.prefs.serverUrl = url
-        serverBase.value = ryx.api.base
-        message.value = "Servidor guardado: $url"
-    }
-
-    fun resetServer() {
-        ryx.prefs.serverUrl = null
-        serverBase.value = ryx.api.base
-        message.value = "Servidor de fábrica: ${ryx.api.base}"
-    }
-
-    private fun normalizeServerUrl(raw: String): String? {
-        var text = raw.trim()
-        if (text.isEmpty()) return null
-        if (!text.startsWith("http://", true) && !text.startsWith("https://", true)) text = "https://$text"
-        return try {
-            val uri = java.net.URI(text)
-            if (uri.host.isNullOrBlank()) null else text.trimEnd('/')
-        } catch (e: Exception) {
-            null
-        }
-    }
 
     fun syncNow() {
         SyncScheduler.now(ryx)
