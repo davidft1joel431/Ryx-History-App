@@ -22,7 +22,9 @@ la muestra en pantalla). Esa clave se escribe en el panel, página **Servidor**.
 
 Opciones: `--root` carpeta del servidor, `--port` puerto, `--host` interfaz,
 `--token` clave fija, `--node` nombre, `--db` archivo SQLite,
-`--public-url` dirección pública (si hay proxy delante).
+`--public-url` dirección pública (si hay proxy delante),
+`--discord-secret-file` archivo con el Client Secret (para no escribirlo en la
+consola: queda fuera del historial de comandos).
 
 Deja abierto el puerto 8787 (o el que elijas) en el firewall del servidor.
 
@@ -44,7 +46,18 @@ Deja abierto el puerto 8787 (o el que elijas) en el firewall del servidor.
      --discord-id 1234567890 --discord-secret xxxxx
    ```
 
+   O deja el secreto en un archivo y pásalo aparte (recomendado):
+
+   ```
+   python ryx_server.py --root C:\ryx --port 8787 ^
+     --discord-id 1234567890 --discord-secret-file C:\ryx\discord_secret.txt
+   ```
+
    También valen las variables `RYX_DISCORD_ID` y `RYX_DISCORD_SECRET`.
+
+   El servidor imprime el `redirect_uri` exacto y avisa si es `http://` con una
+   IP: Discord solo acepta HTTPS (o `http://localhost`), así que ese aviso
+   significa que el portal rechazará la URL tal cual.
 
 Con Discord configurado la app puede entrar con Discord o vincular Discord a una
 cuenta creada con correo y contraseña (perfil → **Vincular mi Discord**).

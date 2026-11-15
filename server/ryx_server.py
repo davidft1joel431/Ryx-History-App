@@ -1033,6 +1033,8 @@ def main() -> None:
                         help="Client ID de la aplicacion de Discord")
     parser.add_argument("--discord-secret", default=os.environ.get("RYX_DISCORD_SECRET", ""),
                         help="Client Secret de la aplicacion de Discord")
+    parser.add_argument("--discord-secret-file", default="",
+                        help="Archivo con el Client Secret (evita escribirlo en la consola)")
     parser.add_argument("--public-url", default=os.environ.get("RYX_PUBLIC_URL", ""),
                         help="URL publica del servidor (por defecto http://<Host>)")
     args = parser.parse_args()
@@ -1046,8 +1048,15 @@ def main() -> None:
     Handler.node = args.node
     Handler.store = Store(db_path)
     Handler.store.drop_expired()
+    secret = args.discord_secret.strip()
+    if args.discord_secret_file:
+        try:
+            secret = Path(args.discord_secret_file).expanduser().read_text(encoding="utf-8").strip()
+        except OSError as error:
+            print(f"No se pudo leer el client secret: {error}")
+            raise SystemExit(2)
     Handler.discord_id = args.discord_id.strip()
-    Handler.discord_secret = args.discord_secret.strip()
+    Handler.discord_secret = secret
     Handler.public_url = args.public_url.strip()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
@@ -1060,6 +1069,12 @@ def main() -> None:
     if Handler.discord_id and Handler.discord_secret:
         print(f"Discord:   activo (client {Handler.discord_id})")
         print(f"Redirect URI que debes registrar: {base.rstrip('/')}/auth/discord/callback")
+        limpio = base.rstrip("/")
+        local = limpio.startswith("http://127.0.0.1") or limpio.startswith("http://localhost")
+        if not limpio.startswith("https://") and not local:
+            print("Aviso:    Discord solo acepta redirects HTTPS (o http://localhost).")
+            print("          Con una IP y http el portal responde «Invalid OAuth2 redirect_uri».")
+            print("          Pon HTTPS delante y arranca con --public-url https://tudominio.com")
     else:
         print("Discord:   sin configurar (--discord-id / --discord-secret)")
     print("Deja esta ventana abierta. Ctrl+C para parar.")
