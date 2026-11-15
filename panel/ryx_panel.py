@@ -834,7 +834,7 @@ class Panel:
         box, self.name_entry = self.field(form_body)
         box.pack(fill="x", pady=(self.px(4), self.px(10)))
 
-        self.label(form_body, "Direccion (IP o dominio)", size=9, color=MUTED).pack(anchor="w")
+        self.label(form_body, "Direccion (IP:puerto o dominio)", size=9, color=MUTED).pack(anchor="w")
         box, self.url_entry = self.field(form_body)
         box.pack(fill="x", pady=(self.px(4), self.px(4)))
 
@@ -1096,15 +1096,23 @@ class Panel:
                 self.remote_path = ""
                 self.connect_button.set(text="Conectar", state="normal")
                 self.link_status.config(text=f"●  conectado · {node.base}", fg=GREEN)
+                database = info.get("database") or {}
                 self.link_info.config(
                     text=(
                         f"{info.get('node') or name}\n"
                         f"{info.get('system', '')}\n"
                         f"disco libre: {human_size(info.get('disk_free', 0))}\n"
-                        f"bases de datos: {len(info.get('databases') or [])}"
+                        f"base de datos: {database.get('users', 0)} usuarios · "
+                        f"{database.get('notifications', 0)} notifs\n"
+                        f"discord: {'activo' if info.get('discord') else 'sin configurar'}\n"
+                        f"bases de datos en disco: {len(info.get('databases') or [])}"
                     )
                 )
                 self.log(f"Conectado a {name} · {node.base}")
+                self.log(
+                    f"  Discord: {'activo' if info.get('discord') else 'sin configurar'}"
+                    f" · base {database.get('path', '(sin datos)')}"
+                )
                 for item in (info.get("databases") or [])[:6]:
                     self.log(f"  base: {item['path']}  ({human_size(item['size'])})")
                 self.refresh_files()
